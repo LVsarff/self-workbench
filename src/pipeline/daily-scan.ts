@@ -114,7 +114,7 @@ export async function runDailyScan(opts: DailyScanOptions): Promise<DailyScanRes
           purpose: 'daily-scan:reasons',
           model: result.audit.model,
           skill: result.audit.skill,
-          input: { systemLength: String(result.audit.input).length, prompt: (result.audit.input as { prompt?: string }).prompt },
+          input: { systemLength: String(result.audit.input ?? '').length, prompt: (result.audit.input as { prompt?: string } | null | undefined)?.prompt ?? null },
           output: result.audit.output,
           ok: true,
           latencyMs: Date.now() - startedAt,
