@@ -1,0 +1,38 @@
+{
+  "name": "gwd-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "个人 AI 带货工作台（MVP：单 Agent 选品中心）",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "gwd": "tsx src/cli.ts",
+    "api": "tsx src/api/server.ts",
+    "schedule": "tsx src/queue/schedule.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.104",
+    "@fastify/cors": "^11.3.1",
+    "ai": "^7.0.156",
+    "bullmq": "^6.5.1",
+    "commander": "^15.0.0",
+    "csv-parse": "^7.0.3",
+    "fastify": "^5.12.7",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/csv-parse": "^1.1.12",
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

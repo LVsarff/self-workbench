@@ -1,0 +1,9 @@
+node_modules/
+.env
+.npm-cache/
+dist/
+*.log
+
+web/node_modules/
+web/.next/
+web/out/
