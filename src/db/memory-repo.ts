@@ -229,4 +229,8 @@ export class MemoryRepo implements Repo {
   async saveLlmLog(entry: LlmLogEntry): Promise<void> {
     this.llmLogs.push({ ...entry, createdAt: new Date().toISOString() });
   }
+
+  async close(): Promise<void> {
+    // 内存实现无需释放
+  }
 }

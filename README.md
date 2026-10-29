@@ -93,8 +93,20 @@ gwd demo                               无 DB/无 key 一键体验
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run test        # vitest：门槛/打分边界、CSV 解析、流水线降级、勾选幂等、
-                     # Agent 工具循环（MockLanguageModelV4：正常提交/步数耗尽/幻觉丢弃）
+                     # Agent 工具循环（MockLanguageModelV4：正常提交/步数耗尽/幻觉丢弃）、
+                     # 对抗性测试 + API 鉴权回归
 ```
+
+## 安全边界（对抗测试后固化）
+
+已完成一轮红队测试（`src/security/adversarial.test.ts`，恶意输入 / Prompt 注入 / 越权指令 / 危险命令四类）。守住的核心防线与已修复的缺口：
+
+- **结构性隔离**：L1 打分零 LLM 参与，注入改变不了分数和排序；Agent 工具面只有 `save_reason`/`submit_list`，无任何 DB 写权限（落库由流水线代码执行）
+- **P1 API 鉴权（已修）**：默认只监听 `127.0.0.1`；配置 `GWD_API_TOKEN` 后所有 `/api/*` 要求 `x-api-token` 头，此时才可 `HOST=0.0.0.0` 暴露内网（web 端配 `NEXT_PUBLIC_API_TOKEN` 同值）
+- **P2 输入截断（已修）**：商家可控文本（标题 120 字 / 类目 40 字）进 Agent prompt 前截断并标记，防超长载荷炸上下文
+- **P3 引用白名单（已修）**：`cited_fields` 必须属于注入上下文的真实字段集，伪造字段名被剥离、全伪造整条丢弃
+- **SQL 全参数化**：`'); DROP TABLE ...` 类载荷原样存取；注入文本夹带的禁售词照样被门槛拦截
+- 降级兜底：伪造 `run_id`、步数耗尽、LLM 失败 → 模板理由补位，流水线永远能完成
 
 ## 设计文档（本仓库的"为什么"）
 

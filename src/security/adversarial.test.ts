@@ -10,7 +10,7 @@ import { scoreProduct } from '../core/scoring.js';
 import { parseCandidatesCsv } from '../pipeline/csv-import.js';
 import { runDailyScan } from '../pipeline/daily-scan.js';
 import { selectProducts } from '../pipeline/select.js';
-import { createAiSdkReasonAgent, validateCollectedReasons } from '../agent/reason-agent.js';
+import { buildAgentPrompt, createAiSdkReasonAgent, validateCollectedReasons } from '../agent/reason-agent.js';
 import type { ProductSnapshot } from '../core/types.js';
 
 const DATE = '2026-01-05';
@@ -45,14 +45,23 @@ async function setup(rows: ProductSnapshot[]): Promise<MemoryRepo> {
 }
 
 describe('A. 恶意输入（数据层攻击）', () => {
-  it('A1 超长标题（60KB 垃圾数据）：流水线不炸、L1 分数不受影响', async () => {
+  it('A1 超长标题（60KB 垃圾数据）：流水线不炸、L1 分数不受影响、进 prompt 前被截断（P2 已修复）', async () => {
     const bomb = snap('A', { title: INJECT + '垃圾'.repeat(20000) });
     const repo = await setup([bomb]);
     const result = await runDailyScan({ repo, date: DATE, agent: null });
     expect(result.topCount).toBe(1);
     const list = await repo.getDailyList(DATE);
     expect(list!.items[0]!.total).toBe(93); // L1 照常打分
-    // 【已知缺口】标题全文未截断，会进入 Agent prompt（成本/上下文风险），见验收报告
+    // P2 修复回归：商家可控文本进 Agent prompt 前截断
+    const { prompt } = buildAgentPrompt({
+      runId: 'r1',
+      top: [scoreProduct('p1', bomb, RULE_V1)],
+      rule: RULE_V1,
+      history: [],
+    });
+    expect(prompt).toContain('[截断]');
+    expect(prompt).not.toContain('垃圾'.repeat(200)); // 60KB 载荷没进上下文
+    expect(prompt.length).toBeLessThan(5000); // prompt 体积可控（成本可控）
   });
 
   it('A2 数值越界（负价格/天价佣金）：不 crash，负价落空 0 分、天价落兜底档', () => {
@@ -100,13 +109,17 @@ describe('B. Prompt Injection（商家可控文本）', () => {
     expect(out[0]!.productId).toBe('p1');
   });
 
-  it('B3【已知缺口】cited_fields 伪造字段名：当前校验只查非空，不查真实性', () => {
+  it('B3 cited_fields 伪造字段名：白名单剥离非法字段，全伪造 → 整条丢弃（P3 已修复）', () => {
     const top = [scoreProduct('p1', snap('A'), RULE_V1)];
     const out = validateCollectedReasons(
-      [{ productId: 'p1', text: '理由'.padEnd(25, '。'), citedFields: ['我瞎编的字段'] }],
+      [
+        { productId: 'p1', text: '全伪造锚点'.padEnd(25, '。'), citedFields: ['我瞎编的字段'] },
+        { productId: 'p1', text: '混合夹带'.padEnd(25, '。'), citedFields: ['total', '我瞎编的字段'] },
+      ],
       top,
     );
-    expect(out).toHaveLength(1); // 防线未拦截 —— 回流：第 2 步（Loop 工具校验加白名单）
+    expect(out).toHaveLength(1); // 全伪造那条被丢弃
+    expect(out[0]!.citedFields).toEqual(['total']); // 混合夹带的非法字段被剥离
   });
 });
 

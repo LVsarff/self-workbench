@@ -9,6 +9,11 @@
 import { useCallback, useEffect, useState } from 'react';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8787';
+const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  return API_TOKEN ? { 'x-api-token': API_TOKEN, ...extra } : { ...extra };
+}
 
 interface Item {
   productId: string;
@@ -62,7 +67,7 @@ export default function Page() {
     setError(null);
     setNotice(null);
     try {
-      const res = await fetch(`${API}/api/daily-list?date=${d}`);
+      const res = await fetch(`${API}/api/daily-list?date=${d}`, { headers: authHeaders() });
       const body = await res.json();
       if (!res.ok) {
         setList(null);
@@ -104,7 +109,7 @@ export default function Page() {
     try {
       const res = await fetch(`${API}/api/select`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: authHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify({ date, externalIds: ids, note: 'web 勾选门' }),
       });
       const body = await res.json();

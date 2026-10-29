@@ -101,4 +101,7 @@ export interface Repo {
   // —— LLM 审计 ——
   countLlmCallsToday(): Promise<number>;
   saveLlmLog(entry: LlmLogEntry): Promise<void>;
+
+  /** 释放连接（MemoryRepo 为空操作，PgRepo 关闭连接池） */
+  close(): Promise<void>;
 }

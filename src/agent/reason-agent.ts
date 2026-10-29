@@ -47,14 +47,26 @@ export interface ReasonAgent {
   generate(req: ReasonRequest): Promise<ReasonAgentResult>;
 }
 
+/**
+ * 商家可控文本截断（对抗测试 P2 修复）：
+ * 标题/类目来自选品广场，可能被塞超长垃圾或注入载荷——进 prompt 前截断，截断处显式标记。
+ */
+function clipText(text: string | null, max: number): string | null {
+  if (text === null) return null;
+  return text.length <= max ? text : `${text.slice(0, max)}…[截断]`;
+}
+
+const TITLE_MAX = 120;
+const CATEGORY_MAX = 40;
+
 /** Top 候选 → 注入上下文的快照（查询结果进上下文，不是原始库） */
 function topToInput(p: ScoredProduct) {
   const s = p.snapshot;
   return {
     product_id: p.productId,
     external_id: s.externalId,
-    title: s.title,
-    category: s.category,
+    title: clipText(s.title, TITLE_MAX),
+    category: clipText(s.category, CATEGORY_MAX),
     price: s.price,
     commission_rate: s.commissionRate,
     sales_30d: s.sales30d,
@@ -97,19 +109,31 @@ const ReasonArgsSchema = z.object({
   cited_fields: z.array(z.string()).min(1),
 });
 
-/** 校验收集到的理由（引用必须来自 Top 候选，长度合规） */
+/**
+ * cited_fields 白名单（对抗测试 P3 修复）：
+ * 理由引用的字段名必须真实存在于注入上下文（topToInput 的键集），
+ * 伪造字段名被过滤；全部非法 → 整条理由丢弃（防幻觉锚点）。
+ */
+const ALLOWED_CITED_FIELDS = new Set([
+  'product_id', 'external_id', 'title', 'category', 'price',
+  'commission_rate', 'sales_30d', 'mom_trend', 'review_rate', 'return_rate',
+  'merchant_score', 'dimension_scores', 'total', 'grade', 'flags',
+]);
+
+/** 校验收集到的理由（引用必须来自 Top 候选，长度合规，字段名净化） */
 export function validateCollectedReasons(
   collected: Array<{ productId: string; text: string; citedFields: string[] }>,
   top: ScoredProduct[],
 ): Array<{ productId: string; text: string; citedFields: string[] }> {
   const validIds = new Set(top.map((p) => p.productId));
-  return collected.filter(
-    (r) =>
-      validIds.has(r.productId) &&
-      r.text.length >= 20 &&
-      r.text.length <= 300 &&
-      r.citedFields.length >= 1,
-  );
+  const out: Array<{ productId: string; text: string; citedFields: string[] }> = [];
+  for (const r of collected) {
+    if (!validIds.has(r.productId) || r.text.length < 20 || r.text.length > 300) continue;
+    const cited = r.citedFields.filter((f) => ALLOWED_CITED_FIELDS.has(f));
+    if (cited.length === 0) continue; // 全部是伪造字段名 → 丢弃
+    out.push({ ...r, citedFields: cited });
+  }
+  return out;
 }
 
 /**
