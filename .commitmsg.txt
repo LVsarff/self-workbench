@@ -1,9 +1,0 @@
-商品层数据通道（模块④ 商品层表现转绿，38/46→39/46）：real-product-import / real-product-list
-
-- 迁移 0010 product_performance 表（source='manual' 类型+check 双重锁死，KuaiRec 无商品归因故无模拟通道）
-- 联盟/带货后台按品导出 CSV → 商品-日台账「加购/成交订单/成交金额/佣金」，幂等可重跑 + 按品汇总成交降序
-- 金额十进制半进位到分（规避 Math.round(n*100) 双精度半分陷阱，对账口径不丢分）
-- 清洗逻辑抽到 core/text-clean.ts 与账号层通道共用一处维护（real-import 同步改引用）
-- product_id 对应候选快照 external_id，预埋归因 join 锚点（归因查询仍是模块⑤ 后续）
-- 契约测试（字段映射/金额清洗/表头校验/幂等/source 锁死/按品汇总/端到端）+ 四类对抗测试 16 用例（攻破 0 项，复用已修复清洗防线；回流标注：商品层数据进 LLM 必须走 prompt-guard，第 1 步）
-- 475 测试全绿 + typecheck 通过；参数未验证标注保持
