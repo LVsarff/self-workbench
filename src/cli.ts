@@ -50,11 +50,14 @@ import { runSimDashboard } from './pipeline/sim-dashboard.js';
 import { runSimPlayImport } from './pipeline/sim-play-import.js';
 import { runSimContent } from './pipeline/sim-content.js';
 import { runSimWeekly } from './pipeline/sim-weekly.js';
+import { runSimWeeklyAI } from './pipeline/sim-weekly-ai.js';
+import { createWeeklyAgentFromEnv } from './agent/weekly-agent.js';
 import { runRealImport } from './pipeline/real-import.js';
 import { runRealDashboard } from './pipeline/real-dashboard.js';
 import { runExport } from './pipeline/export.js';
 import { todayShanghai } from './util.js';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 loadEnv();
 
@@ -867,6 +870,84 @@ program
       if (repo instanceof PgRepo) await repo.close();
     }
   });
+
+program
+  .command('sim-weekly-ai')
+  .description('周报 AI 叙事 + 规则调整建议（模块⑤：零 LLM 骨架之上加 LLM 层，建议→提案草案→人批准）')
+  .option('--author <id>', '账号（作者 id），缺省取总曝光第一的头部账号')
+  .option('--date <date>', '周结束日 YYYY-MM-DD（含当天，往前 7 天为本周），缺省取最后有数据的一天')
+  .option('--propose-dir <dir>', '把规则建议写成 rule propose 兼容的提案 JSON 文件（人审后 gwd rule propose <file>）')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { author?: string; date?: string; proposeDir?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const agent = createWeeklyAgentFromEnv();
+      if (!agent) console.log('ℹ 未配置 OPENAI_API_KEY —— 降级为零 LLM 骨架（gwd sim-weekly 同款输出）');
+      const r = await runSimWeeklyAI({ repo, authorId: opts.author, weekEnd: opts.date, agent });
+      const pct = (v: number | null): string => (v == null ? '-' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`);
+      const pp = (v: number | null): string => (v == null ? '-' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}pp`);
+      const ratio = (v: number): string => `${(v * 100).toFixed(1)}%`;
+      console.log(`\n📋 周报复盘（AI 叙事）— 账号 ${r.report.authorId} · ${r.report.currentWeek.dateFrom} ~ ${r.report.currentWeek.dateTo}`);
+      console.log(`⚠ ${r.report.disclaimer}`);
+      // 零 LLM 骨架核心（完整版见 gwd sim-weekly）
+      const c = r.report.comparison;
+      console.log('—— 骨架数据（系统计算）——');
+      console.log(`  曝光 ${c.current.showCnt.toLocaleString()}（环比 ${pct(c.changes.showCnt)}） · 播放 ${c.current.playCnt.toLocaleString()}（${pct(c.changes.playCnt)}）`);
+      console.log(`  完播率 ${ratio(c.current.completeRate)}（${pp(c.changes.completeRatePp)}） · 互动率 ${ratio(c.current.interactionRate)}（${pp(c.changes.interactionRatePp)}）`);
+      console.log(`  涨粉 ${c.current.followCnt.toLocaleString()}（${pct(c.changes.followCnt)}） · 本周内容数 ${c.current.videoCount}`);
+      if (r.report.anomalies.length > 0) {
+        console.log(`  异常日 ${r.report.anomalies.length} 个: ${r.report.anomalies.map((a) => `${a.date}${a.direction === 'up' ? '↑' : '↓'}${Math.abs(a.changePct * 100).toFixed(0)}%`).join('、')}`);
+      }
+      console.log('—— AI 叙事 ——');
+      if (r.narrative) {
+        console.log(`  ${r.narrative.summary}`);
+      } else {
+        console.log(`  ⚠ 无 AI 叙事${r.budgetExceeded ? '（LLM 日预算已用尽）' : '（LLM 未配置或校验丢弃）'}——以上骨架数据即完整结论（gwd sim-weekly 看规则触发建议）`);
+      }
+      console.log('—— 规则调整建议（AI 提案草案，人批准前不生效）——');
+      if (r.proposals.length === 0) {
+        console.log('  无（数据不支撑或建议被校验丢弃——宁缺勿滥）');
+      }
+      r.proposals.forEach((p, i) => {
+        console.log(`  ${i + 1}. 依据: ${p.basis}`);
+        console.log(`     预期效果: ${p.expectedEffect}`);
+        const changes = Object.entries(diffRule(r.activeRule as unknown as Record<string, unknown>, p.config as unknown as Record<string, unknown>)).map(([k, [from, to]]) => `${k}: ${from} → ${to}`);
+        console.log(`     参数变更: ${changes.join('；')}`);
+      });
+      if (r.degraded) {
+        console.log(`⚠ 部分产出被降级丢弃${r.budgetExceeded ? '（LLM 日预算已用尽）' : '（LLM 失败或校验丢弃）'}`);
+      }
+      if (opts.proposeDir && r.proposals.length > 0) {
+        mkdirSync(opts.proposeDir, { recursive: true });
+        r.proposals.forEach((p, i) => {
+          const file = join(opts.proposeDir!, `proposal-${i + 1}.json`);
+          writeFileSync(file, JSON.stringify({ basis: p.basis, expectedEffect: p.expectedEffect, config: p.config }, null, 2), 'utf8');
+          console.log(`已写提案草案: ${file}`);
+        });
+        console.log('人审后生效链: gwd rule propose <file> → gwd rule proposals → gwd rule approve <id>（批准时刻重校验 + 可 rollback）');
+      } else if (r.proposals.length > 0) {
+        console.log('（--propose-dir <dir> 可把建议导出为提案文件）');
+      }
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+/** 提案 config 与 active 规则的差异（展示用：白名单路径上的数值变化） */
+function diffRule(active: Record<string, unknown>, proposal: Record<string, unknown>): Record<string, [unknown, unknown]> {
+  const out: Record<string, [unknown, unknown]> = {};
+  const paths = [
+    'gates.minCommissionRate', 'gates.minReviewRate', 'gates.maxReturnRate', 'gates.minMerchantScore',
+    'grading.strongMin', 'grading.testMin', 'topN',
+  ];
+  const get = (obj: unknown, path: string): unknown => path.split('.').reduce<unknown>((cur, p) => (cur == null ? undefined : (cur as Record<string, unknown>)[p]), obj);
+  for (const p of paths) {
+    const from = get(active, p);
+    const to = get(proposal, p);
+    if (from !== to && to !== undefined) out[p] = [from, to];
+  }
+  return out;
+}
 
 program
   .command('real-import <csv>')
