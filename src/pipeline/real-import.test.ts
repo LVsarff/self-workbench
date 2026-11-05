@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRepo } from '../db/memory-repo.js';
 import { parseItemDailyRecord } from './sim-import.js';
-import { parseRealRecord, parseIsoDate, runRealImport, validateHeaders, unknownHeaders, REAL_SOURCE } from './real-import.js';
+import { parseRealRecord, runRealImport, validateHeaders, unknownHeaders, REAL_SOURCE } from './real-import.js';
+import { parseIsoDate } from '../core/text-clean.js';
 import { REAL_DISCLAIMER, runRealDashboard } from './real-dashboard.js';
 
 const REAL_CSV = [

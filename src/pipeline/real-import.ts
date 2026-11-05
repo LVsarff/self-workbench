@@ -14,6 +14,7 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { parse } from 'csv-parse';
 import type { Repo, SimContentStatRow } from '../db/repo.js';
+import { cleanCount, cleanText, parseIsoDate } from '../core/text-clean.js';
 
 /** 真实数据来源标记（与 'kuairec' 隔离） */
 export const REAL_SOURCE = 'manual' as const;
@@ -27,54 +28,6 @@ const KNOWN_OPTIONAL_HEADERS = [
   '曝光数', '播放数', '完播数', '点赞数', '评论数', '分享数', '涨粉数', '收藏数',
   '标题', '话题', '类目',
 ] as const;
-
-/** 'YYYY-MM-DD' 校验（真实日历日；非法返回 null） */
-export function parseIsoDate(raw: string | undefined | null): string | null {
-  if (raw == null) return null;
-  const v = String(raw).trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
-  const [ys, ms, ds] = v.split('-');
-  const y = Number(ys);
-  const m = Number(ms);
-  const d = Number(ds);
-  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
-  const t = new Date(Date.UTC(y, m - 1, d));
-  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== m - 1 || t.getUTCDate() !== d) return null;
-  return v;
-}
-
-/** 文本字段长度上限（对抗修复：超长字段资源滥用/输出污染；超限截断） */
-export const FIELD_MAX_LENGTH = 1000;
-
-/**
- * 入口消毒（对抗修复：终端输出注入）：
- * - 剥离 ANSI 转义序列（如 \u001b[31m，防止看板输出伪造）
- * - 换行折成空格（防止字段内换行伪造 CLI 后续行）
- * - 剩余 C0 控制字符与 DEL 一律去除
- * - 截断至 FIELD_MAX_LENGTH
- */
-function sanitizeText(v: string): string {
-  return v
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '') // ANSI CSI 序列
-    .replace(/[\r\n]+/g, ' ') // 换行 → 空格（保留可读性）
-    .replace(/[\u0000-\u001f\u007f]/g, '') // 其余控制字符
-    .slice(0, FIELD_MAX_LENGTH);
-}
-
-/** 文本清洗：空 / 全空白 → null（不编造）；其余消毒后返回 */
-function cleanText(raw: string | undefined | null): string | null {
-  if (raw == null) return null;
-  const v = sanitizeText(String(raw).trim());
-  return v === '' ? null : v;
-}
-
-/** 计数清洗：缺失/空 → 0；负数或非数字 → null 视为非法行（真实数据不猜） */
-function cleanCount(raw: string | undefined | null): number | null {
-  const v = cleanText(raw);
-  if (v == null) return 0;
-  const n = Number(v.replace(/,/g, '')); // 容忍千分位（后台导出常见）
-  return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
-}
 
 /** 表头校验：必填列齐全才放行（错列早失败，不静默落错数据） */
 export function validateHeaders(headers: string[]): string | null {

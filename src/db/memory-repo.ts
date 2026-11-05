@@ -11,6 +11,9 @@ import type {
   DecisionRow,
   ImportResult,
   LlmLogEntry,
+  ProductPerfRow,
+  ProductPerfSource,
+  ProductPerfSummary,
   PublishRecordInput,
   PublishRecordRow,
   ReasonRow,
@@ -62,6 +65,7 @@ export class MemoryRepo implements Repo {
   private researches = new Map<string, ResearchRow>(); // productId → row（一品一份）
   private simStats = new Map<string, SimContentStatRow>(); // JSON.stringify([source,videoId,statDate]) → row（幂等键；数组序列化防字段内 `|` 碰撞）
   private simPlayEvents = new Map<string, SimPlayEventRow>(); // JSON.stringify([source,videoId,userId,watchTs]) → row（幂等键，同上）
+  private productPerf = new Map<string, ProductPerfRow>(); // JSON.stringify([source,productId,statDate]) → row（幂等键，同上）
   private ruleVersions: Array<{ version: number; config: RuleConfig; status: string; changeReason: string | null; createdAt: string }> = [];
   private ruleProposals: RuleProposalRow[] = [];
   private llmLogs: Array<LlmLogEntry & { createdAt: string }> = [];
@@ -436,6 +440,66 @@ export class MemoryRepo implements Repo {
       };
     });
     return overviews.sort((a, b) => b.totalShow - a.totalShow || a.authorId.localeCompare(b.authorId)).slice(0, limit);
+  }
+
+  // —— 商品层表现（模块④ V3：真实通道，source 类型锁死 'manual'）——
+  async upsertProductStats(rows: ProductPerfRow[]): Promise<{ inserted: number; skipped: number }> {
+    let inserted = 0;
+    let skipped = 0;
+    for (const r of rows) {
+      const key = JSON.stringify([r.source, r.productId, r.statDate]);
+      if (this.productPerf.has(key)) {
+        skipped += 1; // 幂等：已存在跳过，不覆盖（与 PgRepo on conflict do nothing 一致）
+      } else {
+        this.productPerf.set(key, { ...r });
+        inserted += 1;
+      }
+    }
+    return { inserted, skipped };
+  }
+
+  async listProductPerformance(source: ProductPerfSource, limit: number): Promise<ProductPerfSummary[]> {
+    const byProduct = new Map<string, ProductPerfRow[]>();
+    for (const r of this.productPerf.values()) {
+      if (r.source !== source) continue; // 红线：按 source 隔离，禁止混读
+      const list = byProduct.get(r.productId) ?? [];
+      list.push(r);
+      byProduct.set(r.productId, list);
+    }
+    // 标题/类目取数据日内最新非空值（与 PgRepo array_agg … order by 语义一致）
+    const latestText = (rows: ProductPerfRow[], pick: (r: ProductPerfRow) => string | null): string | null => {
+      const sorted = [...rows].sort((a, b) => b.statDate.localeCompare(a.statDate));
+      for (const r of sorted) {
+        const v = pick(r);
+        if (v != null) return v;
+      }
+      return null;
+    };
+    const summaries: ProductPerfSummary[] = [...byProduct.entries()].map(([productId, rows]) => {
+      const dates = rows.map((r) => r.statDate).sort();
+      return {
+        productId,
+        productTitle: latestText(rows, (r) => r.productTitle),
+        category: latestText(rows, (r) => r.category),
+        dateFrom: dates[0]!,
+        dateTo: dates[dates.length - 1]!,
+        statDays: rows.length,
+        clickCnt: rows.reduce((s, r) => s + r.clickCnt, 0),
+        addCartCnt: rows.reduce((s, r) => s + r.addCartCnt, 0),
+        orderCnt: rows.reduce((s, r) => s + r.orderCnt, 0),
+        gmvAmount: Math.round(rows.reduce((s, r) => s + r.gmvAmount, 0) * 100) / 100,
+        commissionAmount: Math.round(rows.reduce((s, r) => s + r.commissionAmount, 0) * 100) / 100,
+      };
+    });
+    return summaries
+      .sort((a, b) => b.gmvAmount - a.gmvAmount || a.productId.localeCompare(b.productId))
+      .slice(0, limit);
+  }
+
+  async getProductStats(source: ProductPerfSource, productId: string): Promise<ProductPerfRow[]> {
+    return [...this.productPerf.values()]
+      .filter((r) => r.source === source && r.productId === productId)
+      .sort((a, b) => a.statDate.localeCompare(b.statDate));
   }
 
   // —— 模拟播放事件（模块④ B3 第二批）——

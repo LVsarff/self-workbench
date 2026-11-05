@@ -20,6 +20,8 @@
  *   gwd sim-dashboard [--author]           模拟数据账号看板（日趋势/Top 内容/异常日）
  *   gwd real-import <csv> [--limit]        导入本人账号真实表现数据（P0，source=manual，幂等）
  *   gwd real-dashboard [--author]          真实数据账号看板（口径同模拟看板，双源隔离）
+ *   gwd real-product-import <csv> [--limit]  导入商品层真实表现数据（模块④ V3，source=manual，幂等）
+ *   gwd real-product-list [--top]          商品层表现一览（加购/成交/佣金，按品汇总）
  *   gwd demo                               无 DB/无 API key 一键体验全流程
  */
 import { Command } from 'commander';
@@ -54,6 +56,8 @@ import { runSimWeeklyAI } from './pipeline/sim-weekly-ai.js';
 import { createWeeklyAgentFromEnv } from './agent/weekly-agent.js';
 import { runRealImport } from './pipeline/real-import.js';
 import { runRealDashboard } from './pipeline/real-dashboard.js';
+import { runRealProductImport } from './pipeline/real-product-import.js';
+import { runRealProductList } from './pipeline/real-product-list.js';
 import { runExport } from './pipeline/export.js';
 import { todayShanghai } from './util.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1008,6 +1012,48 @@ program
         console.log(`—— 账号一览（换看: gwd real-dashboard --author <id>）——`);
         console.log(`  ${topAuthors.map((a) => `${a.authorId}（曝光 ${a.totalShow.toLocaleString()} / ${a.videoCount} 条）`).join('  ·  ')}`);
       }
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('real-product-import <csv>')
+  .description('导入商品层真实表现数据（模块④ V3：联盟/带货后台按品导出 CSV → 商品-日台账，幂等可重跑）')
+  .option('--limit <n>', '最多读取行数（试跑用，默认全量）', (v: string) => Number(v))
+  .option('--db <mode>', 'pg | memory')
+  .action(async (csv: string, opts: { limit?: number; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const result = await runRealProductImport({ repo, file: csv, limit: opts.limit });
+      console.log(`\nreal-product-import 完成（真实数据 · source=manual，商品层只有真实通道，KuaiRec 模拟无商品归因）`);
+      console.log(`  读取 ${result.total} 行：入库 ${result.inserted}，跳过已存在 ${result.skipped}，无效 ${result.invalid}`);
+      console.log(`  覆盖 ${result.productCount} 个商品 · ${result.dateFrom} ~ ${result.dateTo}`);
+      if (result.unknown.length > 0) console.log(`  ⚠ 未识别的表头（已忽略）: ${result.unknown.join('、')}`);
+      if (result.inserted > 0) console.log(`  一览: gwd real-product-list`);
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('real-product-list')
+  .description('商品层表现一览（模块④ V3：按品汇总 加购/成交/佣金，按成交金额降序，零 LLM）')
+  .option('--top <n>', '最多展示品数（默认 20）', (v: string) => Number(v))
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { top?: number; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const { disclaimer, summary } = await runRealProductList({ repo, top: opts.top });
+      const money = (v: number): string => `¥${v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      console.log(`\n🛒 商品层表现（按品汇总 · 按成交金额降序 · 前 ${summary.length} 品）`);
+      console.log(`ℹ ${disclaimer}`);
+      summary.forEach((p, i) => {
+        const commissionRate = p.gmvAmount > 0 ? ` · 佣金率 ${(p.commissionAmount / p.gmvAmount * 100).toFixed(1)}%` : '';
+        console.log(`  ${String(i + 1).padStart(2)}. [${p.productId}] ${p.productTitle ?? '（无标题）'}${p.category ? ` · ${p.category}` : ''}`);
+        console.log(`     点击 ${p.clickCnt.toLocaleString()} · 加购 ${p.addCartCnt.toLocaleString()} · 成交订单 ${p.orderCnt.toLocaleString()}`);
+        console.log(`     成交 ${money(p.gmvAmount)} · 佣金 ${money(p.commissionAmount)}${commissionRate}（${p.dateFrom} ~ ${p.dateTo} · ${p.statDays} 天）`);
+      });
     } finally {
       if (repo instanceof PgRepo) await repo.close();
     }

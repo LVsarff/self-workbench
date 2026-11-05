@@ -246,6 +246,46 @@ export interface SimAuthorOverview {
   totalFollow: number;
 }
 
+// —— 商品层表现（模块④ V3：真实通道；KuaiRec 无商品归因，模拟 source 永不存在）——
+
+/** 商品层来源标记：只有真实通道（后台人工导出），类型上锁死，杜绝模拟数据混入 */
+export type ProductPerfSource = 'manual';
+
+/** 「商品-日」粒度表现行（口径：联盟/带货后台按品导出；product_id 对应候选快照 external_id） */
+export interface ProductPerfRow {
+  source: ProductPerfSource;
+  productId: string;
+  /** YYYY-MM-DD */
+  statDate: string;
+  productTitle: string | null;
+  category: string | null;
+  clickCnt: number;
+  /** 加购 */
+  addCartCnt: number;
+  /** 成交订单数 */
+  orderCnt: number;
+  /** 成交金额（元，两位小数） */
+  gmvAmount: number;
+  /** 佣金金额（元，两位小数） */
+  commissionAmount: number;
+}
+
+/** 按品汇总一览（按成交金额降序；标题/类目取数据日内最新非空值） */
+export interface ProductPerfSummary {
+  productId: string;
+  productTitle: string | null;
+  category: string | null;
+  dateFrom: string;
+  dateTo: string;
+  /** 有数据的天数 */
+  statDays: number;
+  clickCnt: number;
+  addCartCnt: number;
+  orderCnt: number;
+  gmvAmount: number;
+  commissionAmount: number;
+}
+
 /** 播放事件粒度行（模块④ B3 第二批：KuaiRec small_matrix，内容明细下钻用） */
 export interface SimPlayEventRow {
   source: SimSource;
@@ -340,6 +380,14 @@ export interface Repo {
   getSimPlayEventsByVideo(videoId: string): Promise<SimPlayEventRow[]>;
   /** 指定来源 + 内容的全部日粒度表现行（下钻时关联 caption / 类目 / 账号总量；红线：必须传 source 防混读） */
   getSimStatsByVideo(source: SimSource, videoId: string): Promise<SimContentStatRow[]>;
+
+  // —— 商品层表现（模块④ V3：真实通道，source 类型锁死 'manual'）——
+  /** 批量落库（幂等键 (source, product_id, stat_date) 已存在跳过，不覆盖） */
+  upsertProductStats(rows: ProductPerfRow[]): Promise<{ inserted: number; skipped: number }>;
+  /** 按品汇总一览（按成交金额降序；红线：必须传 source 防混读） */
+  listProductPerformance(source: ProductPerfSource, limit: number): Promise<ProductPerfSummary[]>;
+  /** 单品日序列（按 stat_date 升序；周报/下钻用） */
+  getProductStats(source: ProductPerfSource, productId: string): Promise<ProductPerfRow[]>;
 
   // —— LLM 审计 ——
   countLlmCallsToday(): Promise<number>;

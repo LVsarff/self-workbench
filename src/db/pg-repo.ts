@@ -11,6 +11,9 @@ import type {
   ContentDraftRow,
   DecisionRow,
   LlmLogEntry,
+  ProductPerfRow,
+  ProductPerfSource,
+  ProductPerfSummary,
   PublishRecordInput,
   PublishRecordRow,
   ReasonRow,
@@ -777,6 +780,104 @@ export class PgRepo implements Repo {
       totalShow: Number(r.total_show ?? 0),
       totalPlay: Number(r.total_play ?? 0),
       totalFollow: Number(r.total_follow ?? 0),
+    }));
+  }
+
+  // —— 商品层表现（模块④ V3：真实通道，source 类型锁死 'manual'）——
+  async upsertProductStats(rows: ProductPerfRow[]): Promise<{ inserted: number; skipped: number }> {
+    // 10 列/行；每批 1000 行 = 1 万参数（pg 上限 65535，留足余量）
+    const COLS = 10;
+    const BATCH = 1000;
+    let inserted = 0;
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      for (let start = 0; start < rows.length; start += BATCH) {
+        const batch = rows.slice(start, start + BATCH);
+        const values: unknown[] = [];
+        const tuples = batch
+          .map((r, i) => {
+            const base = i * COLS;
+            const cols = [
+              r.source, r.productId, r.statDate, r.productTitle, r.category,
+              r.clickCnt, r.addCartCnt, r.orderCnt, r.gmvAmount, r.commissionAmount,
+            ];
+            values.push(...cols);
+            return `(${cols.map((_, j) => `$${base + j + 1}`).join(',')})`;
+          })
+          .join(',');
+        const { rowCount } = await client.query(
+          `insert into product_performance
+             (source, product_id, stat_date, product_title, category,
+              click_cnt, add_cart_cnt, order_cnt, gmv_amount, commission_amount)
+           values ${tuples}
+           on conflict (source, product_id, stat_date) do nothing`, // 幂等：已存在跳过，不覆盖
+          values,
+        );
+        inserted += rowCount ?? 0;
+      }
+      await client.query('commit');
+      return { inserted, skipped: rows.length - inserted };
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listProductPerformance(source: ProductPerfSource, limit: number): Promise<ProductPerfSummary[]> {
+    // 标题/类目取数据日内最新非空值：null 排最后，再按日期倒序取第一个
+    const { rows } = await this.pool.query(
+      `select product_id,
+              (array_agg(product_title order by (product_title is null), stat_date desc))[1] as product_title,
+              (array_agg(category order by (category is null), stat_date desc))[1] as category,
+              min(stat_date)::text as date_from,
+              max(stat_date)::text as date_to,
+              count(*) as stat_days,
+              sum(click_cnt) as click_cnt,
+              sum(add_cart_cnt) as add_cart_cnt,
+              sum(order_cnt) as order_cnt,
+              sum(gmv_amount) as gmv_amount,
+              sum(commission_amount) as commission_amount
+       from product_performance
+       where source = $1
+       group by product_id
+       order by gmv_amount desc, product_id asc
+       limit $2`,
+      [source, limit],
+    );
+    return rows.map((r) => ({
+      productId: String(r.product_id),
+      productTitle: r.product_title == null ? null : String(r.product_title),
+      category: r.category == null ? null : String(r.category),
+      dateFrom: String(r.date_from),
+      dateTo: String(r.date_to),
+      statDays: Number(r.stat_days),
+      clickCnt: Number(r.click_cnt ?? 0),
+      addCartCnt: Number(r.add_cart_cnt ?? 0),
+      orderCnt: Number(r.order_cnt ?? 0),
+      gmvAmount: Math.round(Number(r.gmv_amount ?? 0) * 100) / 100,
+      commissionAmount: Math.round(Number(r.commission_amount ?? 0) * 100) / 100,
+    }));
+  }
+
+  async getProductStats(source: ProductPerfSource, productId: string): Promise<ProductPerfRow[]> {
+    const { rows } = await this.pool.query(
+      `select * from product_performance where source = $1 and product_id = $2 order by stat_date asc`,
+      [source, productId],
+    );
+    return rows.map((r) => ({
+      source: 'manual',
+      productId: String(r.product_id),
+      statDate: String(r.stat_date),
+      productTitle: r.product_title == null ? null : String(r.product_title),
+      category: r.category == null ? null : String(r.category),
+      clickCnt: Number(r.click_cnt),
+      addCartCnt: Number(r.add_cart_cnt),
+      orderCnt: Number(r.order_cnt),
+      gmvAmount: Number(r.gmv_amount),
+      commissionAmount: Number(r.commission_amount),
     }));
   }
 
