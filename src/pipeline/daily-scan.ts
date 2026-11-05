@@ -63,7 +63,11 @@ export async function runDailyScan(opts: DailyScanOptions): Promise<DailyScanRes
 
     // —— L1 确定性计算（无 LLM）——
     const scored = active.map((s) => scoreProduct(s.productId, s, rule));
-    const { ranked, pending } = rankScored(scored);
+    const { ranked } = rankScored(scored);
+    // 待评 = 门槛已过但主观三维缺（真·待评，grade-suggest 的目标组）。
+    // 门槛淘汰品单独计数——原 rankScored.pending 把门槛淘汰也算进"待评"，
+    // 导致汇总行"待评 8、门槛淘汰 6"口径重叠（8 里含 6，两者相加超过打分数）。
+    const pending = scored.filter((p) => p.gatePassed && !p.complete);
 
     const scoreRows: ScoreRecordRow[] = scored.map((p) => ({
       runId,
@@ -88,7 +92,9 @@ export async function runDailyScan(opts: DailyScanOptions): Promise<DailyScanRes
     let budgetExceeded = false;
     let agent = requestedAgent;
     if (agent) {
-      const budget = opts.llmBudgetPerDay ?? Number(process.env.GWD_LLM_BUDGET_CALLS_PER_DAY ?? 50);
+      // env 乱值（如 'abc'）→ Number() 为 NaN，比较恒 false 会让熔断悄悄失效 → 兜底默认 50
+      const raw = opts.llmBudgetPerDay ?? Number(process.env.GWD_LLM_BUDGET_CALLS_PER_DAY ?? 50);
+      const budget = Number.isFinite(raw) ? raw : 50;
       const used = await repo.countLlmCallsToday();
       if (used >= budget) {
         agent = null;

@@ -2,7 +2,7 @@
  * 七维打分（PRD A.2）。
  * 纯确定性计算（L1），不用 LLM。主观三维缺失 → null + 待评标记，不参与排序。
  */
-import { checkGates, gateLabel } from './gates.js';
+import { checkGates, gateLabel, returnRateLimitFor } from './gates.js';
 import type { RuleConfig } from './rule-config.js';
 import type { DimensionScores, ProductSnapshot, ScoredProduct } from './types.js';
 
@@ -32,7 +32,12 @@ function scorePrice(price: number | null, rule: RuleConfig): number {
   return 0;
 }
 
-function scoreSupplyChain(reviewRate: number | null, returnRate: number | null, rule: RuleConfig): { score: number; capped: boolean } {
+function scoreSupplyChain(
+  reviewRate: number | null,
+  returnRate: number | null,
+  category: string | null,
+  rule: RuleConfig,
+): { score: number; capped: boolean } {
   if (reviewRate == null) return { score: 0, capped: false };
   let score = 0;
   for (const band of rule.scoring.supplyChain) {
@@ -41,8 +46,9 @@ function scoreSupplyChain(reviewRate: number | null, returnRate: number | null, 
       break;
     }
   }
-  // 品退率过高 → 降档（PRD："好评率95%+ 且品退率低"）
-  if (returnRate != null && returnRate > rule.gates.maxReturnRate && score > rule.scoring.highReturnRateCap) {
+  // 品退率过高 → 降档（PRD："好评率95%+ 且品退率低"）；阈值与门槛③ 同口径（分类目基准 → 默认值）
+  const limit = returnRateLimitFor(category, rule.gates);
+  if (returnRate != null && returnRate > limit.max && score > rule.scoring.highReturnRateCap) {
     return { score: rule.scoring.highReturnRateCap, capped: true };
   }
   return { score, capped: false };
@@ -58,7 +64,7 @@ export function scoreProduct(productId: string, s: ProductSnapshot, rule: RuleCo
   const gatePassed = gates.every((g) => g.status !== 'fail');
   const unknownGates = gates.filter((g) => g.status === 'unknown').map((g) => g.code);
 
-  const supply = scoreSupplyChain(s.reviewRate, s.returnRate, rule);
+  const supply = scoreSupplyChain(s.reviewRate, s.returnRate, s.category, rule);
   const contentFriendliness = subjectiveScore(s.contentFriendliness, rule.scoring.contentFriendliness);
   const competition = subjectiveScore(s.competition, rule.scoring.competition);
   const repurchase = subjectiveScore(s.repurchase, rule.scoring.repurchase);

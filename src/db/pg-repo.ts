@@ -2,16 +2,35 @@
 import pg from 'pg';
 import type { RuleConfig } from '../core/rule-config.js';
 import { RuleConfigSchema } from '../core/rule-config.js';
-import type { DailyList, DailyListItem, ProductSnapshot, SimilarProduct } from '../core/types.js';
+import type { DailyList, DailyListItem, DuplicateHit, ProductSnapshot, SimilarProduct } from '../core/types.js';
+import type { Platform } from '../core/types.js';
 import type {
+  ContentDecisionInput,
+  ContentDecisionRow,
+  ContentDraftInput,
+  ContentDraftRow,
   DecisionRow,
   LlmLogEntry,
+  PublishRecordInput,
+  PublishRecordRow,
   ReasonRow,
   Repo,
+  ResearchInput,
+  ResearchRow,
+  ResearchSummary,
   RunRecord,
   ScoreRecordRow,
+  SimAuthorOverview,
+  SimContentStatRow,
+  SimPlayEventRow,
+  SimSource,
   SnapshotWithMeta,
 } from './repo.js';
+
+// DATE 列（oid 1082）默认被驱动解析成本地时区的 Date 对象，String() 化后变成
+// "Wed Oct 28 2026 00:00:00 GMT+0800"，无法再写回 DATE 列（confirm/discard 曾因此全坏）。
+// 统一按 'YYYY-MM-DD' 原始字符串读取，与 MemoryRepo 口径一致，保证读写往返一致。
+pg.types.setTypeParser(1082, (v) => v);
 
 const num = (v: unknown): number | null => (v == null ? null : Number(v));
 
@@ -177,6 +196,11 @@ export class PgRepo implements Repo {
     }));
   }
 
+  async findProductIdByExternalId(externalId: string): Promise<string | null> {
+    const { rows } = await this.pool.query(`select id from products where external_id = $1`, [externalId]);
+    return rows.length === 0 ? null : String(rows[0]!.id);
+  }
+
   // —— run ——
   async createRun(batchDate: string, ruleVersion: number): Promise<string> {
     const { rows } = await this.pool.query(
@@ -328,6 +352,427 @@ export class PgRepo implements Repo {
       action: String(r.action),
       batchDate: r.batch_date,
     }));
+  }
+
+  // —— 内容草稿（模块② B1）——
+  private mapDraftRow(r: any): ContentDraftRow {
+    return {
+      id: String(r.id),
+      runId: String(r.run_id),
+      batchDate: String(r.batch_date),
+      productId: String(r.product_id),
+      platform: String(r.platform) as Platform,
+      status: String(r.status) as ContentDraftRow['status'],
+      content: (r.content ?? null) as ContentDraftRow['content'],
+      bannedHits: Array.isArray(r.banned_hits) ? (r.banned_hits as string[]) : [],
+      review: (r.review ?? null) as ContentDraftRow['review'],
+      duplicates: Array.isArray(r.duplicates) ? (r.duplicates as DuplicateHit[]) : [],
+      revisionCount: r.revision_count == null ? 0 : Number(r.revision_count),
+      note: (r.note ?? null) as string | null,
+      source: String(r.source) as ContentDraftRow['source'],
+      createdAt: new Date(r.created_at).toISOString(),
+      externalId: String(r.external_id),
+      title: (r.title ?? '') as string,
+    };
+  }
+
+  async saveContentDrafts(rows: ContentDraftInput[]): Promise<void> {
+    for (const r of rows) {
+      await this.pool.query(
+        `insert into content_drafts (run_id, batch_date, product_id, platform, status, content, banned_hits, review, duplicates, revision_count, note, source)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         on conflict (product_id, platform) do update set
+           run_id = excluded.run_id, batch_date = excluded.batch_date, status = excluded.status,
+           content = excluded.content, banned_hits = excluded.banned_hits, review = excluded.review,
+           duplicates = excluded.duplicates, revision_count = excluded.revision_count,
+           note = excluded.note, source = excluded.source, created_at = now()`,
+        [
+          r.runId, r.batchDate, r.productId, r.platform, r.status,
+          r.content === null ? null : JSON.stringify(r.content),
+          JSON.stringify(r.bannedHits),
+          r.review === null ? null : JSON.stringify(r.review),
+          JSON.stringify(r.duplicates),
+          r.revisionCount,
+          r.note, r.source,
+        ],
+      );
+    }
+  }
+
+  async getContentDrafts(date: string): Promise<ContentDraftRow[]> {
+    const { rows } = await this.pool.query(
+      `select cd.id, cd.run_id, cd.batch_date, cd.product_id, cd.platform, cd.status, cd.content, cd.banned_hits,
+              cd.review, cd.duplicates, cd.revision_count, cd.note, cd.source, cd.created_at,
+              p.external_id, p.title
+       from content_drafts cd join products p on p.id = cd.product_id
+       where cd.batch_date = $1
+       order by p.external_id asc, cd.platform asc`,
+      [date],
+    );
+    return rows.map((r) => this.mapDraftRow(r));
+  }
+
+  async getRecentContentDrafts(since: string, before: string): Promise<ContentDraftRow[]> {
+    const { rows } = await this.pool.query(
+      `select cd.id, cd.run_id, cd.batch_date, cd.product_id, cd.platform, cd.status, cd.content, cd.banned_hits,
+              cd.review, cd.duplicates, cd.revision_count, cd.note, cd.source, cd.created_at,
+              p.external_id, p.title
+       from content_drafts cd join products p on p.id = cd.product_id
+       where cd.batch_date >= $1::date and cd.batch_date < $2::date
+         and cd.status in ('draft','confirmed') and cd.content is not null
+       order by cd.batch_date desc, p.external_id asc
+       limit 200`,
+      [since, before],
+    );
+    return rows.map((r) => this.mapDraftRow(r));
+  }
+
+  async applyContentDecision(decision: ContentDecisionInput): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      // 状态推进 + 决策落库同事务：中途失败整体回滚，杜绝「状态已变但无决策」的审计断链
+      const { rowCount } = await client.query(
+        `update content_drafts set status = $2 where id = $1`,
+        [decision.draftId, decision.action],
+      );
+      if (rowCount === 0) throw new Error(`内容草稿不存在: ${decision.draftId}`);
+      await client.query(
+        `insert into content_decisions (draft_id, run_id, batch_date, product_id, platform, action, checklist, note, decided_by)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          decision.draftId, decision.runId, decision.batchDate, decision.productId, decision.platform, decision.action,
+          decision.checklist === null ? null : JSON.stringify(decision.checklist),
+          decision.note, decision.decidedBy,
+        ],
+      );
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  async saveContentDecisions(rows: ContentDecisionInput[]): Promise<void> {
+    for (const r of rows) {
+      await this.pool.query(
+        `insert into content_decisions (draft_id, run_id, batch_date, product_id, platform, action, checklist, note, decided_by)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          r.draftId, r.runId, r.batchDate, r.productId, r.platform, r.action,
+          r.checklist === null ? null : JSON.stringify(r.checklist),
+          r.note, r.decidedBy,
+        ],
+      );
+    }
+  }
+
+  async getContentDecisions(date: string): Promise<ContentDecisionRow[]> {
+    const { rows } = await this.pool.query(
+      `select cd.draft_id, cd.run_id, cd.batch_date, cd.product_id, cd.platform, cd.action, cd.checklist, cd.note, cd.decided_by, cd.decided_at
+       from content_decisions cd
+       where cd.batch_date = $1
+       order by cd.decided_at asc`,
+      [date],
+    );
+    return rows.map((r) => ({
+      draftId: String(r.draft_id),
+      runId: String(r.run_id),
+      batchDate: String(r.batch_date),
+      productId: String(r.product_id),
+      platform: String(r.platform) as Platform,
+      action: String(r.action) as ContentDecisionRow['action'],
+      checklist: (r.checklist ?? null) as ContentDecisionRow['checklist'],
+      note: (r.note ?? null) as string | null,
+      decidedBy: String(r.decided_by),
+      decidedAt: new Date(r.decided_at).toISOString(),
+    }));
+  }
+
+  // —— 发布台账（模块③ B2）——
+  private mapPublishRow(r: any): PublishRecordRow {
+    return {
+      id: String(r.id),
+      draftId: String(r.draft_id),
+      runId: String(r.run_id),
+      batchDate: String(r.batch_date),
+      productId: String(r.product_id),
+      platform: String(r.platform) as Platform,
+      status: String(r.status) as PublishRecordRow['status'],
+      plannedAt: r.planned_at == null ? null : new Date(r.planned_at).toISOString(),
+      publishedAt: r.published_at == null ? null : new Date(r.published_at).toISOString(),
+      url: (r.url ?? null) as string | null,
+      aiLabeled: r.ai_labeled == null ? null : Boolean(r.ai_labeled),
+      createdAt: new Date(r.created_at).toISOString(),
+    };
+  }
+
+  async createPublishRecord(rec: PublishRecordInput): Promise<PublishRecordRow> {
+    const { rows } = await this.pool.query(
+      `insert into publish_records (draft_id, run_id, batch_date, product_id, platform, status, planned_at)
+       values ($1,$2,$3,$4,$5,'pending',$6)
+       returning id, draft_id, run_id, batch_date, product_id, platform, status, planned_at, published_at, url, ai_labeled, created_at`,
+      [rec.draftId, rec.runId, rec.batchDate, rec.productId, rec.platform, rec.plannedAt],
+    );
+    return this.mapPublishRow(rows[0]!); // 同 draft_id 重复插入由 unique 约束抛错（调用方先查重）
+  }
+
+  async getPublishRecords(date: string): Promise<PublishRecordRow[]> {
+    const { rows } = await this.pool.query(
+      `select id, draft_id, run_id, batch_date, product_id, platform, status, planned_at, published_at, url, ai_labeled, created_at
+       from publish_records
+       where batch_date = $1
+       order by created_at asc, id asc`,
+      [date],
+    );
+    return rows.map((r) => this.mapPublishRow(r));
+  }
+
+  async recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const { rows } = await client.query(`select status from publish_records where id = $1 for update`, [id]);
+      if (rows.length === 0) throw new Error(`发布记录不存在: ${id}`);
+      if (String(rows[0]!.status) !== 'pending') throw new Error(`发布记录已回填过（幂等拒绝）: ${id}`);
+      await client.query(
+        `update publish_records set status = 'published', published_at = $2, url = $3, ai_labeled = $4, updated_at = now()
+         where id = $1`,
+        [id, patch.publishedAt, patch.url, patch.aiLabeled],
+      );
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // —— 深度调研摘要（模块① V2）——
+  private mapResearchRow(r: Record<string, unknown>): ResearchRow {
+    const s = r.summary as { sentiment: ResearchSummary['sentiment']; highlights: string[]; risks: string[]; material_points: string[] };
+    return {
+      id: String(r.id),
+      productId: String(r.product_id),
+      sourceText: String(r.source_text ?? ''),
+      summary: {
+        sentiment: s.sentiment,
+        highlights: Array.isArray(s.highlights) ? s.highlights : [],
+        risks: Array.isArray(s.risks) ? s.risks : [],
+        materialPoints: Array.isArray(s.material_points) ? s.material_points : [],
+      },
+      runId: r.run_id == null ? null : String(r.run_id),
+      createdAt: new Date(r.created_at as string).toISOString(),
+    };
+  }
+
+  async getResearch(productId: string): Promise<ResearchRow | null> {
+    const { rows } = await this.pool.query(
+      `select * from product_research where product_id = $1`,
+      [productId],
+    );
+    return rows.length === 0 ? null : this.mapResearchRow(rows[0]!);
+  }
+
+  async saveResearch(rec: ResearchInput): Promise<void> {
+    await this.pool.query(
+      `insert into product_research (product_id, source_text, summary, run_id)
+       values ($1, $2, $3::jsonb, $4)
+       on conflict (product_id) do update set
+         source_text = excluded.source_text, summary = excluded.summary,
+         run_id = excluded.run_id, updated_at = now()`,
+      [
+        rec.productId,
+        rec.sourceText,
+        JSON.stringify({
+          sentiment: rec.summary.sentiment,
+          highlights: rec.summary.highlights,
+          risks: rec.summary.risks,
+          material_points: rec.summary.materialPoints,
+        }),
+        rec.runId,
+      ],
+    );
+  }
+
+  // —— 表现台账（模块④ B3 第一批 + P0 真实数据 manual）——
+  private mapSimRow(r: Record<string, unknown>): SimContentStatRow {
+    return {
+      source: r.source === 'manual' ? 'manual' : 'kuairec',
+      videoId: String(r.video_id),
+      authorId: String(r.author_id),
+      statDate: String(r.stat_date),
+      videoType: r.video_type == null ? null : String(r.video_type),
+      uploadDt: r.upload_dt == null ? null : String(r.upload_dt),
+      videoDuration: num(r.video_duration),
+      videoTagName: r.video_tag_name == null ? null : String(r.video_tag_name),
+      showCnt: Number(r.show_cnt ?? 0),
+      playCnt: Number(r.play_cnt ?? 0),
+      completePlayCnt: Number(r.complete_play_cnt ?? 0),
+      likeCnt: Number(r.like_cnt ?? 0),
+      commentCnt: Number(r.comment_cnt ?? 0),
+      shareCnt: Number(r.share_cnt ?? 0),
+      followCnt: Number(r.follow_cnt ?? 0),
+      collectCnt: Number(r.collect_cnt ?? 0),
+      reportCnt: Number(r.report_cnt ?? 0),
+      caption: r.caption == null ? null : String(r.caption),
+      topicTag: r.topic_tag == null ? null : String(r.topic_tag),
+      category: r.category == null ? null : String(r.category),
+    };
+  }
+
+  async upsertSimStats(rows: SimContentStatRow[]): Promise<{ inserted: number; skipped: number }> {
+    // 20 列/行；每批 1000 行 = 2 万参数（pg 上限 65535，留足余量）
+    const COLS = 20;
+    const BATCH = 1000;
+    let inserted = 0;
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      for (let start = 0; start < rows.length; start += BATCH) {
+        const batch = rows.slice(start, start + BATCH);
+        const values: unknown[] = [];
+        const tuples = batch
+          .map((r, i) => {
+            const base = i * COLS;
+            const cols = [
+              r.source, r.videoId, r.authorId, r.statDate, r.videoType, r.uploadDt, r.videoDuration,
+              r.videoTagName, r.showCnt, r.playCnt, r.completePlayCnt, r.likeCnt, r.commentCnt,
+              r.shareCnt, r.followCnt, r.collectCnt, r.reportCnt, r.caption, r.topicTag, r.category,
+            ];
+            values.push(...cols);
+            return `(${cols.map((_, j) => `$${base + j + 1}`).join(',')})`;
+          })
+          .join(',');
+        const { rowCount } = await client.query(
+          `insert into sim_content_stats
+             (source, video_id, author_id, stat_date, video_type, upload_dt, video_duration, video_tag_name,
+              show_cnt, play_cnt, complete_play_cnt, like_cnt, comment_cnt, share_cnt, follow_cnt,
+              collect_cnt, report_cnt, caption, topic_tag, category)
+           values ${tuples}
+           on conflict (source, video_id, stat_date) do nothing`, // 幂等：已存在跳过，不覆盖
+          values,
+        );
+        inserted += rowCount ?? 0;
+      }
+      await client.query('commit');
+      return { inserted, skipped: rows.length - inserted };
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getSimStatsByAuthor(source: SimSource, authorId: string): Promise<SimContentStatRow[]> {
+    const { rows } = await this.pool.query(
+      `select * from sim_content_stats where source = $1 and author_id = $2 order by stat_date asc, video_id asc`,
+      [source, authorId],
+    );
+    return rows.map((r) => this.mapSimRow(r));
+  }
+
+  async listSimAuthors(source: SimSource, limit: number): Promise<SimAuthorOverview[]> {
+    const { rows } = await this.pool.query(
+      `select author_id,
+              count(distinct video_id) as video_count,
+              min(stat_date)::text as date_from,
+              max(stat_date)::text as date_to,
+              sum(show_cnt) as total_show,
+              sum(play_cnt) as total_play,
+              sum(follow_cnt) as total_follow
+       from sim_content_stats
+       where source = $1
+       group by author_id
+       order by total_show desc
+       limit $2`,
+      [source, limit],
+    );
+    return rows.map((r) => ({
+      authorId: String(r.author_id),
+      videoCount: Number(r.video_count),
+      dateFrom: String(r.date_from),
+      dateTo: String(r.date_to),
+      totalShow: Number(r.total_show ?? 0),
+      totalPlay: Number(r.total_play ?? 0),
+      totalFollow: Number(r.total_follow ?? 0),
+    }));
+  }
+
+  // —— 模拟播放事件（模块④ B3 第二批）——
+  private mapSimPlayRow(r: Record<string, unknown>): SimPlayEventRow {
+    return {
+      source: 'kuairec',
+      videoId: String(r.video_id),
+      userId: String(r.user_id),
+      watchDate: r.watch_date == null ? null : String(r.watch_date),
+      watchTs: Number(r.watch_ts),
+      watchedAt: r.watched_at == null ? null : String(r.watched_at),
+      playDuration: num(r.play_duration),
+      videoDuration: num(r.video_duration),
+      watchRatio: num(r.watch_ratio),
+    };
+  }
+
+  async upsertSimPlayEvents(rows: SimPlayEventRow[]): Promise<{ inserted: number; skipped: number }> {
+    // 9 列/行；每批 5000 行 = 4.5 万参数（pg 上限 65535）——467 万行按 5000/批约 934 批
+    const COLS = 9;
+    const BATCH = 5000;
+    let inserted = 0;
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      for (let start = 0; start < rows.length; start += BATCH) {
+        const batch = rows.slice(start, start + BATCH);
+        const values: unknown[] = [];
+        const tuples = batch
+          .map((r, i) => {
+            const base = i * COLS;
+            const cols = [
+              r.source, r.videoId, r.userId, r.watchDate, r.watchTs,
+              r.watchedAt, r.playDuration, r.videoDuration, r.watchRatio,
+            ];
+            values.push(...cols);
+            return `(${cols.map((_, j) => `$${base + j + 1}`).join(',')})`;
+          })
+          .join(',');
+        const { rowCount } = await client.query(
+          `insert into sim_play_events
+             (source, video_id, user_id, watch_date, watch_ts, watched_at, play_duration, video_duration, watch_ratio)
+           values ${tuples}
+           on conflict (source, video_id, user_id, watch_ts) do nothing`, // 幂等：已存在跳过，不覆盖
+          values,
+        );
+        inserted += rowCount ?? 0;
+      }
+      await client.query('commit');
+      return { inserted, skipped: rows.length - inserted };
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getSimPlayEventsByVideo(videoId: string): Promise<SimPlayEventRow[]> {
+    const { rows } = await this.pool.query(
+      `select * from sim_play_events where video_id = $1 order by watch_ts asc`,
+      [videoId],
+    );
+    return rows.map((r) => this.mapSimPlayRow(r));
+  }
+
+  async getSimStatsByVideo(source: SimSource, videoId: string): Promise<SimContentStatRow[]> {
+    const { rows } = await this.pool.query(
+      `select * from sim_content_stats where source = $1 and video_id = $2 order by stat_date asc`,
+      [source, videoId],
+    );
+    return rows.map((r) => this.mapSimRow(r));
   }
 
   // —— LLM 审计 ——

@@ -11,6 +11,7 @@
     "gwd": "tsx src/cli.ts",
     "api": "tsx src/api/server.ts",
     "schedule": "tsx src/queue/schedule.ts",
+    "eval": "tsx src/eval/run-evals.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

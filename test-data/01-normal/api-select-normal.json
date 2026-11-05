@@ -1,0 +1,31 @@
+{
+  "description": "POST /api/select 正常勾选载荷（前置：导入 01-normal/candidates-normal.csv 并跑完 daily-scan）",
+  "endpoint": "POST /api/select",
+  "auth_note": "未配置 GWD_API_TOKEN 时默认仅本机可用、免 token；配置后需带 x-api-token 头或 Authorization: Bearer",
+  "cases": [
+    {
+      "name": "勾选当日榜单前两名（主流程）",
+      "body": { "date": null, "externalIds": ["35692147", "63941758"], "note": "高佣高好评，优先测洗脸巾" },
+      "cli_equivalent": "npm run gwd -- select 35692147 63941758 --note \"高佣高好评，优先测洗脸巾\"",
+      "expected": { "status": 200, "response_contains": ["35692147", "63941758", "selected"] }
+    },
+    {
+      "name": "重复勾选（幂等路径）",
+      "body": { "date": null, "externalIds": ["35692147"], "note": "重复勾选验证幂等" },
+      "cli_equivalent": "npm run gwd -- select 35692147",
+      "expected": { "status": 200, "response_contains": ["alreadySelected", "35692147"] }
+    },
+    {
+      "name": "多品一次勾选（含 79 分可测档）",
+      "body": { "externalIds": ["78412563", "90213547", "61587429"] },
+      "cli_equivalent": "npm run gwd -- select 78412563 90213547 61587429",
+      "expected": { "status": 200, "response_contains": ["selected"] }
+    },
+    {
+      "name": "勾选时附真实备注（验证 note 落决策流水）",
+      "body": { "externalIds": ["38574129"], "note": "浴室场景与账号人设契合，价格带宽裕" },
+      "cli_equivalent": "npm run gwd -- select 38574129 --note \"浴室场景与账号人设契合，价格带宽裕\"",
+      "expected": { "status": 200 }
+    }
+  ]
+}

@@ -3,13 +3,25 @@ import type { RuleConfig } from '../core/rule-config.js';
 import type { DailyList, DailyListItem, ProductSnapshot, SimilarProduct, Trend } from '../core/types.js';
 import type { AgentReason } from '../core/template-reason.js';
 import type {
+  ContentDecisionInput,
+  ContentDecisionRow,
+  ContentDraftInput,
+  ContentDraftRow,
   DecisionRow,
   ImportResult,
   LlmLogEntry,
+  PublishRecordInput,
+  PublishRecordRow,
   ReasonRow,
   Repo,
+  ResearchInput,
+  ResearchRow,
   RunRecord,
   ScoreRecordRow,
+  SimAuthorOverview,
+  SimContentStatRow,
+  SimSource,
+  SimPlayEventRow,
   SnapshotWithMeta,
 } from './repo.js';
 
@@ -41,6 +53,12 @@ export class MemoryRepo implements Repo {
   private scores = new Map<string, ScoreRecordRow>(); // `${runId}|${productId}`
   private reasons = new Map<string, ReasonRow>(); // `${runId}|${productId}`
   private decisions: DecisionRow[] = [];
+  private contentDrafts = new Map<string, ContentDraftRow>(); // `${productId}|${platform}`
+  private contentDecisions: ContentDecisionRow[] = [];
+  private publishRecords = new Map<string, PublishRecordRow>(); // id → row
+  private researches = new Map<string, ResearchRow>(); // productId → row（一品一份）
+  private simStats = new Map<string, SimContentStatRow>(); // JSON.stringify([source,videoId,statDate]) → row（幂等键；数组序列化防字段内 `|` 碰撞）
+  private simPlayEvents = new Map<string, SimPlayEventRow>(); // JSON.stringify([source,videoId,userId,watchTs]) → row（幂等键，同上）
   private ruleVersions: Array<{ version: number; config: RuleConfig; status: string; changeReason: string | null; createdAt: string }> = [];
   private llmLogs: Array<LlmLogEntry & { createdAt: string }> = [];
 
@@ -113,6 +131,10 @@ export class MemoryRepo implements Repo {
 
   async recordImportBatch(batch: { batchDate: string; sourceFile: string; rowCount: number; validCount: number; skippedCount: number; notes?: unknown }): Promise<void> {
     /* demo/test 不持久化导入批次明细 */
+  }
+
+  async findProductIdByExternalId(externalId: string): Promise<string | null> {
+    return this.productsByExternal.get(externalId) ?? null;
   }
 
   async getSnapshotsByDate(date: string): Promise<SnapshotWithMeta[]> {
@@ -218,6 +240,172 @@ export class MemoryRepo implements Repo {
       }
     }
     return out.slice(0, limit);
+  }
+
+  // —— 内容草稿（模块② B1）——
+  async saveContentDrafts(rows: ContentDraftInput[]): Promise<void> {
+    for (const r of rows) {
+      const key = `${r.productId}|${r.platform}`;
+      const prior = this.contentDrafts.get(key);
+      const product = this.products.get(r.productId);
+      // join 回填 externalId/title（与 PgRepo 查询语义一致）
+      this.contentDrafts.set(key, {
+        ...r,
+        id: prior?.id ?? nextId('draft'),
+        externalId: product?.externalId ?? prior?.externalId ?? '',
+        title: product?.title ?? prior?.title ?? '',
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  async getContentDrafts(date: string): Promise<ContentDraftRow[]> {
+    return [...this.contentDrafts.values()]
+      .filter((d) => d.batchDate === date)
+      .sort((a, b) => a.externalId.localeCompare(b.externalId) || a.platform.localeCompare(b.platform));
+  }
+
+  async getRecentContentDrafts(since: string, before: string): Promise<ContentDraftRow[]> {
+    return [...this.contentDrafts.values()]
+      .filter((d) => d.batchDate >= since && d.batchDate < before && (d.status === 'draft' || d.status === 'confirmed') && d.content !== null)
+      .sort((a, b) => (a.batchDate < b.batchDate ? 1 : a.batchDate > b.batchDate ? -1 : a.externalId.localeCompare(b.externalId)));
+  }
+
+  async applyContentDecision(decision: ContentDecisionInput): Promise<void> {
+    const draft = [...this.contentDrafts.values()].find((d) => d.id === decision.draftId);
+    if (!draft) throw new Error(`内容草稿不存在: ${decision.draftId}`);
+    draft.status = decision.action; // 状态推进与决策同点落库（原子语义）
+    this.contentDecisions.push({ ...decision, decidedAt: new Date().toISOString() }); // append-only
+  }
+
+  async saveContentDecisions(rows: ContentDecisionInput[]): Promise<void> {
+    for (const r of rows) {
+      this.contentDecisions.push({ ...r, decidedAt: new Date().toISOString() }); // append-only
+    }
+  }
+
+  async getContentDecisions(date: string): Promise<ContentDecisionRow[]> {
+    return this.contentDecisions.filter((d) => d.batchDate === date);
+  }
+
+  // —— 发布台账（模块③ B2）——
+  async createPublishRecord(rec: PublishRecordInput): Promise<PublishRecordRow> {
+    const dup = [...this.publishRecords.values()].find((r) => r.draftId === rec.draftId);
+    if (dup) throw new Error(`该草稿已有发布记录: ${rec.draftId}`);
+    const row: PublishRecordRow = {
+      ...rec,
+      id: nextId('pub'),
+      status: 'pending',
+      publishedAt: null,
+      url: null,
+      aiLabeled: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.publishRecords.set(row.id, row);
+    return { ...row };
+  }
+
+  async getPublishRecords(date: string): Promise<PublishRecordRow[]> {
+    return [...this.publishRecords.values()]
+      .filter((r) => r.batchDate === date)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  async recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean }): Promise<void> {
+    const row = this.publishRecords.get(id);
+    if (!row) throw new Error(`发布记录不存在: ${id}`);
+    if (row.status !== 'pending') throw new Error(`发布记录已回填过（幂等拒绝）: ${id}`);
+    row.status = 'published';
+    row.publishedAt = patch.publishedAt;
+    row.url = patch.url;
+    row.aiLabeled = patch.aiLabeled;
+  }
+
+  // —— 深度调研摘要（模块① V2）——
+  async getResearch(productId: string): Promise<ResearchRow | null> {
+    return this.researches.get(productId) ?? null;
+  }
+
+  async saveResearch(rec: ResearchInput): Promise<void> {
+    const existing = this.researches.get(rec.productId);
+    this.researches.set(rec.productId, {
+      id: existing?.id ?? `res-${(this.researches.size + 1).toString().padStart(3, '0')}`,
+      ...rec,
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+    });
+  }
+
+  // —— 模拟表现台账（模块④ B3 第一批）——
+  async upsertSimStats(rows: SimContentStatRow[]): Promise<{ inserted: number; skipped: number }> {
+    let inserted = 0;
+    let skipped = 0;
+    for (const r of rows) {
+      const key = JSON.stringify([r.source, r.videoId, r.statDate]);
+      if (this.simStats.has(key)) {
+        skipped += 1; // 幂等：已存在跳过，不覆盖（与 PgRepo on conflict do nothing 一致）
+      } else {
+        this.simStats.set(key, { ...r });
+        inserted += 1;
+      }
+    }
+    return { inserted, skipped };
+  }
+
+  async getSimStatsByAuthor(source: SimSource, authorId: string): Promise<SimContentStatRow[]> {
+    return [...this.simStats.values()]
+      .filter((r) => r.source === source && r.authorId === authorId)
+      .sort((a, b) => a.statDate.localeCompare(b.statDate) || a.videoId.localeCompare(b.videoId));
+  }
+
+  async listSimAuthors(source: SimSource, limit: number): Promise<SimAuthorOverview[]> {
+    const byAuthor = new Map<string, SimContentStatRow[]>();
+    for (const r of this.simStats.values()) {
+      if (r.source !== source) continue; // 红线：按 source 隔离，禁止混读
+      const list = byAuthor.get(r.authorId) ?? [];
+      list.push(r);
+      byAuthor.set(r.authorId, list);
+    }
+    const overviews: SimAuthorOverview[] = [...byAuthor.entries()].map(([authorId, rows]) => {
+      const dates = rows.map((r) => r.statDate).sort();
+      return {
+        authorId,
+        videoCount: new Set(rows.map((r) => r.videoId)).size,
+        dateFrom: dates[0]!,
+        dateTo: dates[dates.length - 1]!,
+        totalShow: rows.reduce((s, r) => s + r.showCnt, 0),
+        totalPlay: rows.reduce((s, r) => s + r.playCnt, 0),
+        totalFollow: rows.reduce((s, r) => s + r.followCnt, 0),
+      };
+    });
+    return overviews.sort((a, b) => b.totalShow - a.totalShow || a.authorId.localeCompare(b.authorId)).slice(0, limit);
+  }
+
+  // —— 模拟播放事件（模块④ B3 第二批）——
+  async upsertSimPlayEvents(rows: SimPlayEventRow[]): Promise<{ inserted: number; skipped: number }> {
+    let inserted = 0;
+    let skipped = 0;
+    for (const r of rows) {
+      const key = JSON.stringify([r.source, r.videoId, r.userId, r.watchTs]);
+      if (this.simPlayEvents.has(key)) {
+        skipped += 1; // 幂等：已存在跳过，不覆盖（与 PgRepo on conflict do nothing 一致）
+      } else {
+        this.simPlayEvents.set(key, { ...r });
+        inserted += 1;
+      }
+    }
+    return { inserted, skipped };
+  }
+
+  async getSimPlayEventsByVideo(videoId: string): Promise<SimPlayEventRow[]> {
+    return [...this.simPlayEvents.values()]
+      .filter((r) => r.videoId === videoId)
+      .sort((a, b) => a.watchTs - b.watchTs);
+  }
+
+  async getSimStatsByVideo(source: SimSource, videoId: string): Promise<SimContentStatRow[]> {
+    return [...this.simStats.values()]
+      .filter((r) => r.source === source && r.videoId === videoId)
+      .sort((a, b) => a.statDate.localeCompare(b.statDate));
   }
 
   // —— LLM 审计 ——

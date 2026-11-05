@@ -216,7 +216,7 @@ export function createReasonAgentFromEnv(): ReasonAgent | null {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
   const modelName = process.env.GWD_LLM_MODEL ?? 'gpt-4o-mini';
-  const openai = createOpenAI({ apiKey });
+  const openai = createOpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL ?? undefined });
   return createAiSdkReasonAgent({ model: openai(modelName), modelName });
 }
 

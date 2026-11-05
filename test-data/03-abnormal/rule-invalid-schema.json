@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "gates": {
+    "bannedCategoryKeywords": ["食品", "药品", "医疗", "保健", "金融", "生鲜", "危险", "易碎", "酒"],
+    "minReviewRate": "85",
+    "maxReturnRate": 10,
+    "minCommissionRate": 15,
+    "minMerchantScore": 70,
+    "forbiddenFulfillmentKeywords": ["货到付款", "预售"]
+  },
+  "scoring": {
+    "commission": [
+      { "min": 30, "score": 20 },
+      { "min": 20, "score": 15 },
+      { "min": 15, "score": 10 },
+      { "min": 0, "score": 0 }
+    ],
+    "demand": [
+      { "minSales": 1000, "requireUp": true, "score": 20 },
+      { "minSales": 1000, "score": 15 },
+      { "minSales": 500, "score": 15 },
+      { "minSales": 100, "score": 10 },
+      { "minSales": 0, "score": 5 }
+    ],
+    "price": [
+      { "min": 19.9, "max": 99, "score": 10 },
+      { "min": 99, "max": 199, "score": 7 },
+      { "min": 0, "max": 999999, "score": 5 }
+    ],
+    "supplyChain": [
+      { "minReviewRate": 95, "score": 10 },
+      { "minReviewRate": 85, "score": 6 },
+      { "minReviewRate": 0, "score": 3 }
+    ],
+    "contentFriendliness": { "5": 15, "4": 12, "3": 8, "2": 5, "1": 3 },
+    "competition": { "5": 15, "4": 13, "3": 10, "2": 8, "1": 5 },
+    "repurchase": { "5": 10, "4": 8, "3": 6, "2": 5, "1": 2 },
+    "highReturnRateCap": 3
+  },
+  "grading": { "strongMin": 80, "testMin": 60 },
+  "topN": -5,
+  "_expected_reject": "zod schema 失败：minReviewRate 是字符串（应为 number）；topN 为负（应为正整数）"
+}

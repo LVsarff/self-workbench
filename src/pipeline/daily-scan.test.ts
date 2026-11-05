@@ -68,7 +68,7 @@ describe('runDailyScan：主流水线', () => {
     const result = await runDailyScan({ repo, date: DATE, agent: null });
     expect(result.scoredCount).toBe(4);
     expect(result.topCount).toBe(2);
-    expect(result.pendingCount).toBe(2);
+    expect(result.pendingCount).toBe(1); // 仅 D（门槛过 + 三维缺）；门槛淘汰的 C 不再重复计入待评
     expect(result.gateFailedCount).toBe(1);
     expect(result.reasonSource).toBe('template');
     expect(result.degraded).toBe(false);

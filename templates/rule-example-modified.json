@@ -4,6 +4,10 @@
     "bannedCategoryKeywords": ["食品", "药品", "医疗", "保健", "金融", "生鲜", "危险", "易碎", "酒"],
     "minReviewRate": 85,
     "maxReturnRate": 10,
+    "categoryReturnRateBenchmarks": [
+      { "keyword": "服饰", "maxReturnRate": 15 },
+      { "keyword": "鞋靴", "maxReturnRate": 12 }
+    ],
     "minCommissionRate": 18,
     "minMerchantScore": 70,
     "forbiddenFulfillmentKeywords": ["货到付款", "预售"]

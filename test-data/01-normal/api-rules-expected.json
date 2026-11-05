@@ -1,0 +1,36 @@
+{
+  "description": "GET /api/rules 预期响应参照（前置：gwd rule init 初始化 v1 后）",
+  "endpoint": "GET /api/rules",
+  "expected_shape": {
+    "version": 1,
+    "gates": {
+      "bannedCategoryKeywords": ["食品", "药品", "医疗", "保健", "金融", "生鲜", "危险", "易碎", "酒"],
+      "minReviewRate": 85,
+      "maxReturnRate": 10,
+      "minCommissionRate": 15,
+      "minMerchantScore": 70,
+      "forbiddenFulfillmentKeywords": ["货到付款", "预售"]
+    },
+    "scoring": {
+      "commission_max": 20,
+      "demand_max": 20,
+      "price_max": 10,
+      "supplyChain_max": 10,
+      "contentFriendliness_max": 15,
+      "competition_max": 15,
+      "repurchase_max": 10
+    },
+    "grading": { "strongMin": 80, "testMin": 60 },
+    "topN": 5
+  },
+  "assertions": [
+    "status 200 且 version=1",
+    "七个维度满分合计 = 100（gwd rule show 可肉眼核对）",
+    "主观三维档位 1-5 齐全",
+    "testMin(60) < strongMin(80)",
+    "未 init 时返回 404 与错误信息「没有 active 规则」"
+  ],
+  "edge_cases": {
+    "no_rule": { "status": 404, "body_contains": "没有 active 规则" }
+  }
+}

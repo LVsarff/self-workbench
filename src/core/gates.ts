@@ -18,6 +18,27 @@ export function gateLabel(code: string): string {
   return GATE_LABEL[code] ?? code;
 }
 
+export interface ReturnRateLimit {
+  /** 适用的品退率阈值 */
+  max: number;
+  /** 命中的基准关键词（null = 未命中任何分类目基准，走默认阈值） */
+  keyword: string | null;
+}
+
+/**
+ * 门槛③ 取品退率阈值：先查分类目基准表（类目文本包含匹配，先声明先匹配），
+ * 未命中（含类目缺失）走默认 maxReturnRate。门槛判定与供应链降档共用，保证口径一致。
+ */
+export function returnRateLimitFor(category: string | null, g: RuleConfig['gates']): ReturnRateLimit {
+  if (category) {
+    const lower = category.toLowerCase();
+    for (const b of g.categoryReturnRateBenchmarks ?? []) {
+      if (lower.includes(b.keyword.toLowerCase())) return { max: b.maxReturnRate, keyword: b.keyword };
+    }
+  }
+  return { max: g.maxReturnRate, keyword: null };
+}
+
 function containsKeyword(text: string | null, keywords: string[]): string | null {
   if (!text) return null;
   const lower = text.toLowerCase();
@@ -48,13 +69,24 @@ export function checkGates(s: ProductSnapshot, rule: RuleConfig): GateResult[] {
         : { code: 'review_rate', status: 'pass' },
   );
 
-  // ③ 品退率：MVP 全类目统一阈值（TODO 分类目基准）
+  // ③ 品退率：分类目基准 → 默认阈值（PRD"符合类目准入标准"）
+  const limit = returnRateLimitFor(s.category, g);
   results.push(
     s.returnRate == null
       ? { code: 'return_rate', status: 'unknown', detail: '数据缺失' }
-      : s.returnRate > g.maxReturnRate
-        ? { code: 'return_rate', status: 'fail', detail: `${s.returnRate}% > ${g.maxReturnRate}%` }
-        : { code: 'return_rate', status: 'pass' },
+      : s.returnRate > limit.max
+        ? {
+            code: 'return_rate',
+            status: 'fail',
+            detail: limit.keyword
+              ? `${s.returnRate}% > 类目「${limit.keyword}」基准 ${limit.max}%`
+              : `${s.returnRate}% > ${limit.max}%`,
+          }
+        : {
+            code: 'return_rate',
+            status: 'pass',
+            detail: limit.keyword ? `类目「${limit.keyword}」基准 ${limit.max}%` : undefined,
+          },
   );
 
   // ④ 佣金率 > 15（严格大于）

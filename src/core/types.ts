@@ -110,3 +110,74 @@ export const GRADE_LABEL: Record<Grade, string> = {
   test: '可测',
   drop: '放弃',
 };
+
+// —— 模块② 内容工坊（B1 首项：双平台草稿）——
+
+export type Platform = 'xiaohongshu' | 'douyin';
+
+export const PLATFORM_LABEL: Record<Platform, string> = {
+  xiaohongshu: '小红书',
+  douyin: '抖音',
+};
+
+/**
+ * 草稿状态机：draft（LLM 产出待确认）→ confirmed / discarded（门③，人确认，未建）
+ * needs_manual = 降级标记（无 key / LLM 失败 / 校验不过），人重写后同样走门③。
+ */
+export type DraftStatus = 'draft' | 'needs_manual' | 'confirmed' | 'discarded';
+
+/** 小红书种草笔记草稿 */
+export interface XiaohongshuNote {
+  /** 5-20 字 */
+  title: string;
+  /** 150-500 字 */
+  body: string;
+  /** 3-8 个 */
+  tags: string[];
+  coverIdea: string | null;
+}
+
+/** 抖音口播脚本草稿 */
+export interface DouyinScript {
+  /** 前 3 秒钩子，5-30 字 */
+  hook: string;
+  /** 卖点段，2-4 条 */
+  points: string[];
+  /** 行动指令，5-50 字 */
+  cta: string;
+}
+
+// —— 模块② B1 剩余：双层自检 + 门③ ——
+
+/** L2 审查维度（content-review 任务包口径） */
+export type ContentRiskType = 'absolute' | 'medical' | 'exaggeration' | 'fabricated_data' | 'other';
+
+export interface ContentRisk {
+  type: ContentRiskType;
+  /** 指向原文短语的具体说明 */
+  detail: string;
+}
+
+/**
+ * L2 LLM 审查结论（落库形态）。
+ * 语义边界（《场景拆解》2.1 #11）：L2 仅提示，不拦截 —— pass=false 时草稿仍是 draft，
+ * 由门③ 人工在 5 项清单第 2 项里终判；pass=null 表示未得出结论（审查器缺失/异常）。
+ */
+export interface ContentReviewRecord {
+  pass: boolean | null;
+  risks: ContentRisk[];
+  /** 审查器标识（scripted / ai-sdk:模型名） */
+  model: string;
+  /** pass=null 时的原因 */
+  skippedReason?: string;
+}
+
+/** 历史去重命中（与新草稿相似度超阈值的近期草稿） */
+export interface DuplicateHit {
+  externalId: string;
+  batchDate: string;
+  /** 展示标题（小红书标题 / 抖音钩子） */
+  title: string;
+  /** 字符二元组 Jaccard 相似度 0-1 */
+  similarity: number;
+}

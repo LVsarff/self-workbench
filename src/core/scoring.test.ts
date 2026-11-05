@@ -66,6 +66,15 @@ describe('七维打分（PRD A.2 边界值）', () => {
     expect(capped.flags).toContain('品退率高供应链降档');
   });
 
+  it('供应链降档阈值随分类目基准：服饰 12% 不降档，家居 12% 降档', () => {
+    const apparel = score({ reviewRate: 96, returnRate: 12, category: '服饰内衣/女装' });
+    expect(apparel.scores.supplyChain).toBe(10);
+    expect(apparel.flags).not.toContain('品退率高供应链降档');
+    const home = score({ reviewRate: 96, returnRate: 12, category: '家居收纳' });
+    expect(home.scores.supplyChain).toBe(RULE_V1.scoring.highReturnRateCap);
+    expect(home.flags).toContain('品退率高供应链降档');
+  });
+
   it('主观三维：5/4/3 档映射', () => {
     expect(score({ contentFriendliness: 5 }).scores.contentFriendliness).toBe(15);
     expect(score({ competition: 3 }).scores.competition).toBe(10);

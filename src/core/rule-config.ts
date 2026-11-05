@@ -13,6 +13,8 @@ const demandBand = z.object({
 });
 const priceBand = z.object({ min: z.number(), max: z.number(), score: z.number().int() });
 const supplyBand = z.object({ minReviewRate: z.number(), score: z.number().int() });
+/** 分类目品退率基准（PRD 门槛③"符合类目准入标准"）：类目文本含 keyword 即套用该阈值 */
+const returnRateBenchmark = z.object({ keyword: z.string().min(1), maxReturnRate: z.number().positive() });
 const subjectiveMap = z.record(z.string(), z.number().int());
 
 export const RuleConfigSchema = z.object({
@@ -20,7 +22,10 @@ export const RuleConfigSchema = z.object({
   gates: z.object({
     bannedCategoryKeywords: z.array(z.string()),
     minReviewRate: z.number(),
+    /** 默认品退率阈值（未命中任何分类目基准时套用） */
     maxReturnRate: z.number(),
+    /** 可选：兼容未含基准表的存量规则版本（缺省 = 全类目统一 maxReturnRate） */
+    categoryReturnRateBenchmarks: z.array(returnRateBenchmark).optional(),
     minCommissionRate: z.number(),
     minMerchantScore: z.number(),
     forbiddenFulfillmentKeywords: z.array(z.string()),
@@ -47,7 +52,18 @@ export const RULE_V1: RuleConfig = {
   gates: {
     bannedCategoryKeywords: ['食品', '药品', '医疗', '保健', '金融', '生鲜', '危险', '易碎', '酒'],
     minReviewRate: 85,
-    maxReturnRate: 10, // TODO: 替换为分类目基准表（PRD 门槛③）
+    // 分类目品退率基准（PRD 门槛③）：初始经验值 · 未验证——高退货类目适当放宽，
+    // 真实成交数据积累后经 `gwd rule apply` 走版本化流程校准，禁止系统自行改数
+    categoryReturnRateBenchmarks: [
+      { keyword: '服饰', maxReturnRate: 15 },
+      { keyword: '女装', maxReturnRate: 15 },
+      { keyword: '男装', maxReturnRate: 15 },
+      { keyword: '内衣', maxReturnRate: 15 },
+      { keyword: '鞋靴', maxReturnRate: 12 },
+      { keyword: '珠宝', maxReturnRate: 12 },
+      { keyword: '饰品', maxReturnRate: 12 },
+    ],
+    maxReturnRate: 10,
     minCommissionRate: 15, // 严格大于
     minMerchantScore: 70,
     forbiddenFulfillmentKeywords: ['货到付款', '预售'],
@@ -126,6 +142,15 @@ export function validateBusinessRule(cfg: RuleConfig): string[] {
   if (cfg.grading.testMin >= cfg.grading.strongMin) {
     errors.push('grading.testMin 必须小于 strongMin');
   }
+
+  const benchmarks = cfg.gates.categoryReturnRateBenchmarks ?? [];
+  const seenKeywords = new Set<string>();
+  for (const b of benchmarks) {
+    if (b.maxReturnRate > 100) errors.push(`品退率基准「${b.keyword}」阈值应 ≤ 100`);
+    if (seenKeywords.has(b.keyword)) errors.push(`品退率基准关键词重复：「${b.keyword}」`);
+    seenKeywords.add(b.keyword);
+  }
+
   return errors;
 }
 
@@ -143,7 +168,7 @@ export function parseRuleConfig(json: unknown): { ok: true; config: RuleConfig }
 export function ruleSummary(cfg: RuleConfig): string {
   const g = cfg.gates;
   return [
-    `门槛：类目禁售关键词[${g.bannedCategoryKeywords.join('、')}]；好评率≥${g.minReviewRate}%；品退率≤${g.maxReturnRate}%（缺失记"数据缺失"）；佣金率>${g.minCommissionRate}%；商家体验分≥${g.minMerchantScore}；履约不含[${g.forbiddenFulfillmentKeywords.join('、')}]`,
+    `门槛：类目禁售关键词[${g.bannedCategoryKeywords.join('、')}]；好评率≥${g.minReviewRate}%；品退率≤${g.maxReturnRate}%（分类目基准表可覆盖，缺失记"数据缺失"）；佣金率>${g.minCommissionRate}%；商家体验分≥${g.minMerchantScore}；履约不含[${g.forbiddenFulfillmentKeywords.join('、')}]`,
     `满分构成：佣金${Math.max(...cfg.scoring.commission.map((b) => b.score))} 需求${Math.max(...cfg.scoring.demand.map((b) => b.score))} 内容友好度${Math.max(...Object.values(cfg.scoring.contentFriendliness))} 竞争度${Math.max(...Object.values(cfg.scoring.competition))} 价格带${Math.max(...cfg.scoring.price.map((b) => b.score))} 供应链${Math.max(...cfg.scoring.supplyChain.map((b) => b.score))} 复购${Math.max(...Object.values(cfg.scoring.repurchase))}（合计100）`,
     `分级：总分≥${cfg.grading.strongMin} 强推；${cfg.grading.testMin}-${cfg.grading.strongMin - 1} 可测；<${cfg.grading.testMin} 放弃`,
   ].join('\n');

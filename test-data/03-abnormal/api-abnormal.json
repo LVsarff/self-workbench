@@ -1,0 +1,121 @@
+{
+  "description": "异常/破坏性输入载荷集（CLI 命令 + API 请求），验证校验拦截、幂等与注入防护",
+  "usage": "每项给出 CLI 等价命令与预期报错文案（预期报错以「CLI 失败退出 + stderr 输出」或「API 4xx + error 字段」出现）",
+  "cases": [
+    {
+      "id": "select-empty-array",
+      "target": "POST /api/select",
+      "body": { "externalIds": [] },
+      "expected": { "status": 400, "error_contains": "externalIds 不能为空" }
+    },
+    {
+      "id": "select-missing-body",
+      "target": "POST /api/select",
+      "body": null,
+      "expected": { "status": 400, "error_contains": "externalIds 不能为空" }
+    },
+    {
+      "id": "select-unknown-ids",
+      "target": "POST /api/select",
+      "body": { "externalIds": ["不存在的ID999", "GHOST-000"] },
+      "expected": { "status": 409, "error_contains": "不在" }
+    },
+    {
+      "id": "select-no-list-date",
+      "target": "POST /api/select",
+      "body": { "date": "2020-01-01", "externalIds": ["35692147"] },
+      "expected": { "status": 409, "error_contains": "没有候选清单" },
+      "note": "选择一个从未跑过 daily-scan 的日期"
+    },
+    {
+      "id": "select-invalid-date",
+      "target": "POST /api/select",
+      "body": { "date": "2026-13-45", "externalIds": ["35692147"] },
+      "expected": { "status": 400, "error_contains": "date 格式无效" },
+      "note": "API 层对 date 做格式硬校验（含非真实日历日如 2026-02-31），坏格式直接 400，不落到 DB 报 500；GET /api/daily-list 同口径"
+    },
+    {
+      "id": "select-1000-ids-flood",
+      "target": "POST /api/select",
+      "body": { "externalIds": ["假ID-0001", "假ID-0002", "假ID-0003", "假ID-0004", "假ID-0005"], "_note": "实际执行时把数组扩展为 1000 个（脚本生成），观察 409 拒绝与服务稳定" },
+      "expected": { "status": 409, "error_contains": "不在" }
+    },
+    {
+      "id": "select-bad-token",
+      "target": "GET /api/daily-list",
+      "headers": { "x-api-token": "错误token或缺失" },
+      "precondition": "设置环境变量 GWD_API_TOKEN 后启动 API 才生效",
+      "expected": { "status": 401, "error_contains": "无效 API token" }
+    },
+    {
+      "id": "published-empty-url",
+      "target": "CLI gwd published",
+      "cli": "npm run gwd -- published 35692147 xiaohongshu --url \"\"",
+      "expected": { "exit_nonzero": true, "error_contains": "笔记链接不能为空" }
+    },
+    {
+      "id": "published-javascript-url",
+      "target": "CLI gwd published",
+      "cli": "npm run gwd -- published 35692147 xiaohongshu --url \"javascript:alert(1)\"",
+      "expected": { "exit_nonzero": true, "error_contains": "须以 http:// 或 https:// 开头" }
+    },
+    {
+      "id": "published-bad-time",
+      "target": "CLI gwd published",
+      "cli": "npm run gwd -- published 35692147 xiaohongshu --url https://www.xiaohongshu.com/explore/demo0000000000000000 --at 2026-13-45T21:00:00+08:00",
+      "expected": { "exit_nonzero": true, "error_contains": "发布时间格式无效" }
+    },
+    {
+      "id": "published-twice",
+      "target": "CLI gwd published",
+      "cli": "对同一 (商品ID, 平台) 重复执行 published 回填两次",
+      "expected": { "second_exit_nonzero": true, "error_contains": "回填" },
+      "note": "幂等拒绝：一条 pending 记录只可回填一次"
+    },
+    {
+      "id": "confirm-needs-manual",
+      "target": "CLI gwd confirm",
+      "cli": "npm run gwd -- confirm 35692147 xiaohongshu --yes",
+      "precondition": "草稿 status=needs_manual（无 LLM key 生成或 LLM 失败时自动标记）",
+      "expected": { "exit_nonzero": true, "error_contains": "需人工撰写/重新生成" }
+    },
+    {
+      "id": "confirm-banned-draft",
+      "target": "CLI gwd confirm",
+      "cli": "npm run gwd -- confirm 77030001 xiaohongshu --yes --date 2026-10-30",
+      "precondition": "先执行 03-abnormal/seed-banned-draft.sql",
+      "expected": { "exit_nonzero": true, "error_contains": "词表命中（硬拦截）" }
+    },
+    {
+      "id": "confirm-already-confirmed",
+      "target": "CLI gwd confirm",
+      "cli": "对已 confirmed 的草稿再次 confirm",
+      "expected": { "exit_nonzero": true, "error_contains": "已确认过（幂等拦截）" }
+    },
+    {
+      "id": "discard-already-discarded",
+      "target": "CLI gwd discard",
+      "cli": "对已 discarded 的草稿再次 discard",
+      "expected": { "exit_nonzero": true, "error_contains": "已废弃（幂等拦截）" }
+    },
+    {
+      "id": "research-nonexistent-product",
+      "target": "CLI gwd research",
+      "cli": "npm run gwd -- research GHOST-404 --file 01-normal/research-positive.txt",
+      "expected": { "exit_nonzero": true, "error_contains": "没有找到商品" }
+    },
+    {
+      "id": "research-without-force",
+      "target": "CLI gwd research",
+      "cli": "对已有调研摘要的品再次 research（不带 --force）",
+      "expected": { "exit_nonzero": true, "error_contains": "已有一份调研摘要" }
+    },
+    {
+      "id": "select-expired-phase",
+      "target": "CLI gwd select",
+      "cli": "对 phase=expired 的历史清单执行 select",
+      "precondition": "daily_runs 存在 phase='expired' 的记录（可用 SQL 置位后测试）",
+      "expected": { "exit_nonzero": true, "error_contains": "已过期" }
+    }
+  ]
+}

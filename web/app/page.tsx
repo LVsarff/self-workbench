@@ -130,7 +130,10 @@ export default function Page() {
     <main className="wrap">
       <header className="top">
         <h1>AI 带货工作台</h1>
-        <span className="sub">今日候选清单 · 人只做勾选（门①）</span>
+        <span className="sub">
+          今日候选清单 · 人只做勾选（门①） · <a href="/contents">内容确认（门③）</a> · <a href="/publish">发布台账（门④）</a> ·{' '}
+          <a href="/dashboard">数据看板</a>
+        </span>
       </header>
 
       <div className="toolbar">
