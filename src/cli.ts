@@ -52,6 +52,7 @@ import { runSimContent } from './pipeline/sim-content.js';
 import { runSimWeekly } from './pipeline/sim-weekly.js';
 import { runRealImport } from './pipeline/real-import.js';
 import { runRealDashboard } from './pipeline/real-dashboard.js';
+import { runExport } from './pipeline/export.js';
 import { todayShanghai } from './util.js';
 import { readFileSync } from 'node:fs';
 
@@ -274,6 +275,77 @@ rule
     await repo.close();
   });
 
+// —— 规则提案（模块⑤ 回写闭环：建议 → 人批准 → 版本化生效 → 可回滚）——
+rule
+  .command('propose <file>')
+  .description('从 JSON 文件创建规则提案 { basis, expectedEffect?, config }（只登记，不生效）')
+  .action(async (file: string) => {
+    const repo = createRepo() as PgRepo;
+    try {
+      const json = JSON.parse(readFileSync(file, 'utf8')) as { basis?: string; expectedEffect?: string; config?: unknown };
+      if (!json.basis || !json.config) {
+        throw new Error('提案文件需要 basis（依据）与 config（完整规则配置）两个字段');
+      }
+      const row = await repo.createRuleProposal({ basis: json.basis, expectedEffect: json.expectedEffect ?? null, config: json.config as never });
+      console.log(`提案已登记: ${row.id}（pending，等待人工批准）`);
+      console.log(`  依据: ${row.basis}`);
+      if (row.expectedEffect) console.log(`  预期效果: ${row.expectedEffect}`);
+    } catch (e) {
+      console.error(String(e instanceof Error ? e.message : e));
+      process.exitCode = 1;
+    }
+    await repo.close();
+  });
+
+rule
+  .command('proposals')
+  .description('提案列表（建议 → 人批准 → 版本化生效 → 可回滚）')
+  .action(async () => {
+    const repo = createRepo() as PgRepo;
+    const rows = await repo.listRuleProposals();
+    if (rows.length === 0) {
+      console.log('暂无提案');
+    }
+    for (const r of rows) {
+      const mark = r.status === 'pending' ? '⏳' : r.status === 'approved' ? '✅' : '❌';
+      console.log(`${mark} ${r.id}  [${r.status}]  ${r.basis}`);
+      if (r.expectedEffect) console.log(`    预期效果: ${r.expectedEffect}`);
+      if (r.resultingVersion != null) console.log(`    生效版本: v${r.resultingVersion}（可 gwd rule rollback 回滚）`);
+      console.log(`    创建: ${r.createdAt}${r.decidedBy ? ` · 决策: ${r.decidedBy} @ ${r.decidedAt}` : ''}`);
+    }
+    await repo.close();
+  });
+
+rule
+  .command('approve <id>')
+  .description('批准提案 → 重新校验 → 版本链生效（门⑤：系统永不自行生效）')
+  .action(async (id: string) => {
+    const repo = createRepo() as PgRepo;
+    try {
+      const row = await repo.decideRuleProposal(id, { action: 'approve', decidedBy: 'human-cli' });
+      console.log(`已批准提案 ${row.id}，生效为规则 v${row.resultingVersion}（可 gwd rule rollback 回滚）`);
+    } catch (e) {
+      console.error(String(e instanceof Error ? e.message : e));
+      process.exitCode = 1;
+    }
+    await repo.close();
+  });
+
+rule
+  .command('reject <id>')
+  .description('否决提案（留档，active 规则不动）')
+  .action(async (id: string) => {
+    const repo = createRepo() as PgRepo;
+    try {
+      const row = await repo.decideRuleProposal(id, { action: 'reject', decidedBy: 'human-cli' });
+      console.log(`已否决提案 ${row.id}（留档，active 规则未变）`);
+    } catch (e) {
+      console.error(String(e instanceof Error ? e.message : e));
+      process.exitCode = 1;
+    }
+    await repo.close();
+  });
+
 program
   .command('import-candidates <file>')
   .description('导入人工维护的候选 CSV（支持中文表头）')
@@ -329,6 +401,33 @@ program
       console.log(`${date} 没有清单，先执行 gwd daily-scan`);
     } else {
       printList(list);
+    }
+    if (repo instanceof PgRepo) await repo.close();
+  });
+
+program
+  .command('export <what>')
+  .description('导出 CSV（daily=候选清单 / publish=发布台账；导出统一消毒，Excel 可安全打开）')
+  .option('--date <date>', '日期 YYYY-MM-DD，默认今天')
+  .option('--out <file>', '输出文件路径（缺省打印到终端）')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (what: string, opts: { date?: string; out?: string; db?: string }) => {
+    if (what !== 'daily' && what !== 'publish') {
+      console.error('只支持导出 daily（候选清单）或 publish（发布台账）');
+      process.exitCode = 1;
+      return;
+    }
+    const repo = createRepo(opts.db);
+    try {
+      const csv = await runExport({ repo, what, date: opts.date ?? todayShanghai(), out: opts.out });
+      if (opts.out) {
+        console.log(`已导出到 ${opts.out}`);
+      } else {
+        console.log(csv);
+      }
+    } catch (e) {
+      console.error(String(e instanceof Error ? e.message : e));
+      process.exitCode = 1;
     }
     if (repo instanceof PgRepo) await repo.close();
   });
@@ -965,6 +1064,18 @@ program
       const after = await listPublishQueue({ repo, date });
       printPublishQueue(after);
     }
+    console.log(`\n[8] 结论回写闭环（模块⑤）演示：提案登记 → 人批准 → 版本化生效 → 可回滚`);
+    const proposal = await repo.createRuleProposal({
+      basis: 'demo 观察：佣金 15% 档品的曝光表现偏弱（模拟观察 · 参数未验证）',
+      expectedEffect: '佣金门槛提到 18% 后内容转化更稳',
+      config: { ...RULE_V1, version: RULE_V1.version + 1, gates: { ...RULE_V1.gates, minCommissionRate: 18 } },
+    });
+    console.log(`    提案登记: ${proposal.id} [pending]（只登记，不生效——系统永不自行改规则）`);
+    const approved = await repo.decideRuleProposal(proposal.id, { action: 'approve', decidedBy: 'human' });
+    console.log(`    人工批准 → 批准时刻重新校验 → 生效 v${approved.resultingVersion}（版本链 append-only）`);
+    const rb = await repo.rollbackRule();
+    console.log(`    不满意 → gwd rule rollback: v${rb.from} → v${rb.to}（demo 结束恢复原规则）`);
+
     console.log('\n=== demo 结束。真实使用：docker compose up -d → gwd migrate → gwd rule init → 每日 import-candidates + daily-scan → 勾选后 content-gen → confirm → publish-sync → 人工发布 → published 回填 ===');
   });
 

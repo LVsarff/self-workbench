@@ -172,6 +172,33 @@ export interface ResearchRow {
 
 export type ResearchInput = Omit<ResearchRow, 'id' | 'createdAt'>;
 
+// —— 规则提案（模块⑤ 结论回写闭环：建议 → 人批准 → 版本化生效 → 可回滚）——
+
+/**
+ * 规则变更提案（append-only 创建；status 单向一次转换 pending → approved/rejected）。
+ * config 在创建与批准时都过 parseRuleConfig 校验——提案可能躺很久，批准时刻以当前链为准重新校验。
+ */
+export interface RuleProposalRow {
+  id: string;
+  /** 提案依据（审计锚点：如 sim-weekly 触发规则、人工观察） */
+  basis: string;
+  expectedEffect: string | null;
+  config: RuleConfig;
+  status: 'pending' | 'approved' | 'rejected';
+  decidedBy: string | null;
+  decidedAt: string | null;
+  /** 批准后生成的规则版本号（gwd rule rollback 的回滚锚点） */
+  resultingVersion: number | null;
+  createdAt: string;
+}
+
+export interface RuleProposalInput {
+  basis: string;
+  /** 预期效果（人判断的验收锚点），可缺省 */
+  expectedEffect?: string | null;
+  config: RuleConfig;
+}
+
 // —— 表现台账（模块④ B3 第一批：开源数据集 KuaiRec 2.0；P0：真实账号数据 manual）——
 
 /**
@@ -242,6 +269,17 @@ export interface Repo {
   listRuleVersions(): Promise<Array<{ version: number; status: string; changeReason: string | null; createdAt: string }>>;
   applyRuleVersion(config: RuleConfig, meta: { reason: string; approvedBy: string }): Promise<number>;
   rollbackRule(): Promise<{ from: number; to: number }>;
+
+  // —— 规则提案（模块⑤ 回写闭环）——
+  createRuleProposal(input: RuleProposalInput): Promise<RuleProposalRow>;
+  listRuleProposals(): Promise<RuleProposalRow[]>;
+  getRuleProposal(id: string): Promise<RuleProposalRow | null>;
+  /**
+   * 门⑤：提案决策（单向一次）。approve = 批准时刻重新校验 config → 走版本链生效 →
+   * 回填 resulting_version（与版本链同事务）；reject = 仅置 rejected，active 规则不动。
+   * 非 pending 状态再决策抛错（幂等拒绝，审计不留二义）。
+   */
+  decideRuleProposal(id: string, decision: { action: 'approve' | 'reject'; decidedBy: string }): Promise<RuleProposalRow>;
 
   // —— 导入 ——
   upsertSnapshots(rows: ProductSnapshot[], batchDate: string): Promise<ImportResult>;

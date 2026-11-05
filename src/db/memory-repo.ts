@@ -1,5 +1,6 @@
 /** 内存仓储：测试 + `gwd demo`（无 DB 一键跑通全流程）。语义与 PgRepo 一致（幂等、append-only 约定）。 */
 import type { RuleConfig } from '../core/rule-config.js';
+import { parseRuleConfig } from '../core/rule-config.js';
 import type { DailyList, DailyListItem, ProductSnapshot, SimilarProduct, Trend } from '../core/types.js';
 import type { AgentReason } from '../core/template-reason.js';
 import type {
@@ -16,6 +17,8 @@ import type {
   Repo,
   ResearchInput,
   ResearchRow,
+  RuleProposalInput,
+  RuleProposalRow,
   RunRecord,
   ScoreRecordRow,
   SimAuthorOverview,
@@ -60,6 +63,7 @@ export class MemoryRepo implements Repo {
   private simStats = new Map<string, SimContentStatRow>(); // JSON.stringify([source,videoId,statDate]) → row（幂等键；数组序列化防字段内 `|` 碰撞）
   private simPlayEvents = new Map<string, SimPlayEventRow>(); // JSON.stringify([source,videoId,userId,watchTs]) → row（幂等键，同上）
   private ruleVersions: Array<{ version: number; config: RuleConfig; status: string; changeReason: string | null; createdAt: string }> = [];
+  private ruleProposals: RuleProposalRow[] = [];
   private llmLogs: Array<LlmLogEntry & { createdAt: string }> = [];
 
   // —— 规则 ——
@@ -94,6 +98,60 @@ export class MemoryRepo implements Repo {
     active.status = 'rolled_back';
     prev.status = 'active';
     return { from: active.version, to: prev.version };
+  }
+
+  // —— 规则提案（模块⑤ 回写闭环）——
+  async createRuleProposal(input: RuleProposalInput): Promise<RuleProposalRow> {
+    // 创建时刻先校验：非法 config 不让进门（批准时刻还会再校验一次）
+    const parsed = parseRuleConfig(input.config);
+    if (!parsed.ok) throw new Error(`提案 config 校验失败:\n${parsed.errors.map((e) => `  - ${e}`).join('\n')}`);
+    const row: RuleProposalRow = {
+      id: nextId('prop'),
+      basis: input.basis,
+      expectedEffect: input.expectedEffect ?? null,
+      config: structuredClone(parsed.config),
+      status: 'pending',
+      decidedBy: null,
+      decidedAt: null,
+      resultingVersion: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.ruleProposals.push(row);
+    return { ...row, config: structuredClone(row.config) };
+  }
+
+  async listRuleProposals(): Promise<RuleProposalRow[]> {
+    return [...this.ruleProposals]
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((r) => ({ ...r, config: structuredClone(r.config) }));
+  }
+
+  async getRuleProposal(id: string): Promise<RuleProposalRow | null> {
+    const row = this.ruleProposals.find((r) => r.id === id);
+    return row ? { ...row, config: structuredClone(row.config) } : null;
+  }
+
+  async decideRuleProposal(id: string, decision: { action: 'approve' | 'reject'; decidedBy: string }): Promise<RuleProposalRow> {
+    const row = this.ruleProposals.find((r) => r.id === id);
+    if (!row) throw new Error(`提案 ${id} 不存在`);
+    if (row.status !== 'pending') throw new Error(`提案 ${id} 已是 ${row.status}，不能重复决策（审计单向一次）`);
+    const now = new Date().toISOString();
+    row.decidedBy = decision.decidedBy;
+    row.decidedAt = now;
+    if (decision.action === 'approve') {
+      // 门⑤：批准时刻以当前链重新校验（提案可能躺了很久 / 期间版本链已变）
+      const parsed = parseRuleConfig(row.config);
+      if (!parsed.ok) throw new Error(`提案 config 校验失败（批准时刻）:\n${parsed.errors.map((e) => `  - ${e}`).join('\n')}`);
+      const version = await this.applyRuleVersion(parsed.config, {
+        reason: `提案 ${row.id}: ${row.basis}`,
+        approvedBy: decision.decidedBy,
+      });
+      row.status = 'approved';
+      row.resultingVersion = version;
+    } else {
+      row.status = 'rejected';
+    }
+    return { ...row, config: structuredClone(row.config) };
   }
 
   // —— 导入 ——

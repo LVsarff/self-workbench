@@ -15,6 +15,7 @@ import { generateText, stepCountIs, tool, type LanguageModel } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { SKELETON } from './reason-agent.js';
+import { fenceContent } from '../core/prompt-guard.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SKILL_RESEARCH = readFileSync(join(HERE, 'skills', 'research', 'SKILL.md'), 'utf8');
@@ -78,17 +79,10 @@ export function clipSourceText(text: string): string {
 }
 
 /**
- * 原文包裹：原文是商家可控的长文本（最多 8000 字），可能含 ``` 序列——
- * 若用围栏包裹会被原文内容提前闭合，后续内容逃逸成顶层指令。
- * 含 ``` 时改用 4 空格缩进代码块（缩进块内的 ``` 是字面文本，不会闭合）。
+ * 原文包裹（P2 修复 #4 统一到 core/prompt-guard，此处保留同名导出兼容既有测试）：
+ * 围栏逃逸安全——含 ``` 时改 4 空格缩进块。
  */
-export function wrapSourceText(text: string): string {
-  if (!text.includes('```')) return `\`\`\`text\n${text}\n\`\`\``;
-  return text
-    .split('\n')
-    .map((line) => `    ${line}`)
-    .join('\n');
-}
+export const wrapSourceText = fenceContent;
 
 export function buildResearchPrompt(req: { product: ResearchProductContext; sourceText: string }): { system: string; prompt: string } {
   const system = `${SKELETON}\n\n# 当前任务包\n${SKILL_RESEARCH}`;

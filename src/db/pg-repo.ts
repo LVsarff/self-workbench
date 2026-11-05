@@ -1,7 +1,7 @@
 /** PostgreSQL 仓储（node-postgres，参数化 SQL，无 ORM）。 */
 import pg from 'pg';
 import type { RuleConfig } from '../core/rule-config.js';
-import { RuleConfigSchema } from '../core/rule-config.js';
+import { RuleConfigSchema, parseRuleConfig } from '../core/rule-config.js';
 import type { DailyList, DailyListItem, DuplicateHit, ProductSnapshot, SimilarProduct } from '../core/types.js';
 import type { Platform } from '../core/types.js';
 import type {
@@ -18,6 +18,8 @@ import type {
   ResearchInput,
   ResearchRow,
   ResearchSummary,
+  RuleProposalInput,
+  RuleProposalRow,
   RunRecord,
   ScoreRecordRow,
   SimAuthorOverview,
@@ -106,6 +108,81 @@ export class PgRepo implements Repo {
       await client.query(`update rule_versions set status = 'active' where version = $1`, [prevVersion]);
       await client.query('commit');
       return { from: activeVersion, to: prevVersion };
+    } catch (e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // —— 规则提案（模块⑤ 回写闭环）——
+  private mapProposalRow(r: Record<string, unknown>): RuleProposalRow {
+    return {
+      id: String(r.id),
+      basis: String(r.basis),
+      expectedEffect: r.expected_effect == null ? null : String(r.expected_effect),
+      config: RuleConfigSchema.parse(r.config),
+      status: r.status as RuleProposalRow['status'],
+      decidedBy: r.decided_by == null ? null : String(r.decided_by),
+      decidedAt: r.decided_at == null ? null : new Date(r.decided_at as string).toISOString(),
+      resultingVersion: r.resulting_version == null ? null : Number(r.resulting_version),
+      createdAt: new Date(r.created_at as string).toISOString(),
+    };
+  }
+
+  async createRuleProposal(input: RuleProposalInput): Promise<RuleProposalRow> {
+    const parsed = parseRuleConfig(input.config);
+    if (!parsed.ok) throw new Error(`提案 config 校验失败:\n${parsed.errors.map((e) => `  - ${e}`).join('\n')}`);
+    const { rows } = await this.pool.query(
+      `insert into rule_proposals (basis, expected_effect, config, status) values ($1, $2, $3, 'pending') returning *`,
+      [input.basis, input.expectedEffect ?? null, JSON.stringify(parsed.config)],
+    );
+    return this.mapProposalRow(rows[0]!);
+  }
+
+  async listRuleProposals(): Promise<RuleProposalRow[]> {
+    const { rows } = await this.pool.query(`select * from rule_proposals order by created_at desc`);
+    return rows.map((r) => this.mapProposalRow(r));
+  }
+
+  async getRuleProposal(id: string): Promise<RuleProposalRow | null> {
+    const { rows } = await this.pool.query(`select * from rule_proposals where id = $1`, [id]);
+    return rows.length > 0 ? this.mapProposalRow(rows[0]!) : null;
+  }
+
+  async decideRuleProposal(id: string, decision: { action: 'approve' | 'reject'; decidedBy: string }): Promise<RuleProposalRow> {
+    // 批准 = 版本链生效 + 提案回填，同一事务；行锁防并发双批
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const { rows } = await client.query(`select * from rule_proposals where id = $1 for update`, [id]);
+      if (rows.length === 0) throw new Error(`提案 ${id} 不存在`);
+      const row = rows[0]!;
+      if (row.status !== 'pending') throw new Error(`提案 ${id} 已是 ${row.status}，不能重复决策（审计单向一次）`);
+      if (decision.action === 'approve') {
+        const parsed = parseRuleConfig(row.config);
+        if (!parsed.ok) throw new Error(`提案 config 校验失败（批准时刻）:\n${parsed.errors.map((e) => `  - ${e}`).join('\n')}`);
+        const { rows: vRows } = await client.query(`select coalesce(max(version), 0) as v from rule_versions`);
+        const version = Number(vRows[0]!.v) + 1;
+        await client.query(`update rule_versions set status = 'superseded' where status = 'active'`);
+        await client.query(
+          `insert into rule_versions (version, config, status, change_reason, approved_by) values ($1, $2, 'active', $3, $4)`,
+          [version, JSON.stringify({ ...parsed.config, version }), `提案 ${id}: ${String(row.basis)}`, decision.decidedBy],
+        );
+        const { rows: upd } = await client.query(
+          `update rule_proposals set status = 'approved', decided_by = $1, decided_at = now(), resulting_version = $2 where id = $3 returning *`,
+          [decision.decidedBy, version, id],
+        );
+        await client.query('commit');
+        return this.mapProposalRow(upd[0]!);
+      }
+      const { rows: upd } = await client.query(
+        `update rule_proposals set status = 'rejected', decided_by = $1, decided_at = now() where id = $2 returning *`,
+        [decision.decidedBy, id],
+      );
+      await client.query('commit');
+      return this.mapProposalRow(upd[0]!);
     } catch (e) {
       await client.query('rollback');
       throw e;

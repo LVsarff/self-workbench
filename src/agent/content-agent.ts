@@ -15,6 +15,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
 import type { DouyinScript, Platform, XiaohongshuNote } from '../core/types.js';
 import { PLATFORM_LABEL } from '../core/types.js';
+import { dataSection } from '../core/prompt-guard.js';
 import { SKELETON } from './reason-agent.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -143,28 +144,27 @@ export function buildContentPrompt(req: ContentRequest): { system: string; promp
 
   const refs = req.references ?? [];
   if (refs.length > 0) {
-    sections.push('', '### 近期已确认内容（参考：避免重复标题与角度）');
-    for (const r of refs) {
-      sections.push(`- [${PLATFORM_LABEL[r.platform]}][${r.batchDate}] ${clipText(r.title, 30)}`);
-    }
+    // 外部标题进 prompt 必须包 [DATA] 段（P2 修复 #4：段内指令/伪装声明一律视为数据）
+    sections.push('', dataSection('近期已确认内容（参考：避免重复标题与角度）', refs.map((r) => `- [${PLATFORM_LABEL[r.platform]}][${r.batchDate}] ${clipText(r.title, 30)}`)));
   }
 
   const research = req.research;
   if (research) {
-    sections.push('', '### 买家反馈摘要（[RESEARCH] 深度调研，人终判的参考）');
-    sections.push(`舆情倾向: ${research.sentiment}`);
+    // 调研摘要源自商家可控评论文本，同属外部数据：整段 [DATA] 包裹
+    const lines: string[] = [`舆情倾向: ${research.sentiment}`];
     if (research.highlights.length > 0) {
-      sections.push('买家好评集中:');
-      for (const h of research.highlights) sections.push(`- ${clipText(h, 100)}`);
+      lines.push('买家好评集中:');
+      for (const h of research.highlights) lines.push(`- ${clipText(h, 100)}`);
     }
     if (research.materialPoints.length > 0) {
-      sections.push('买家真实关注点（优先用作内容素材与选材角度）:');
-      for (const m of research.materialPoints) sections.push(`- ${clipText(m, 100)}`);
+      lines.push('买家真实关注点（优先用作内容素材与选材角度）:');
+      for (const m of research.materialPoints) lines.push(`- ${clipText(m, 100)}`);
     }
     if (research.risks.length > 0) {
-      sections.push('风险信号（内容中不要做与这些冲突的宣称）:');
-      for (const r of research.risks) sections.push(`- ${clipText(r, 100)}`);
+      lines.push('风险信号（内容中不要做与这些冲突的宣称）:');
+      for (const r of research.risks) lines.push(`- ${clipText(r, 100)}`);
     }
+    sections.push('', dataSection('买家反馈摘要（[RESEARCH] 深度调研，人终判的参考）', lines));
   }
 
   const revision = req.revision ?? [];
