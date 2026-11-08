@@ -22,6 +22,8 @@
  *   gwd real-dashboard [--author]          真实数据账号看板（口径同模拟看板，双源隔离）
  *   gwd real-product-import <csv> [--limit]  导入商品层真实表现数据（模块④ V3，source=manual，幂等）
  *   gwd real-product-list [--top]          商品层表现一览（加购/成交/佣金，按品汇总）
+ *   gwd sim-signals [--author]             模拟数据异常信号（断更/掉粉；退款缺字段显式声明）
+ *   gwd real-signals [--author]            真实数据异常信号（口径与模拟版一致）
  *   gwd demo                               无 DB/无 API key 一键体验全流程
  */
 import { Command } from 'commander';
@@ -58,6 +60,7 @@ import { runRealImport } from './pipeline/real-import.js';
 import { runRealDashboard } from './pipeline/real-dashboard.js';
 import { runRealProductImport } from './pipeline/real-product-import.js';
 import { runRealProductList } from './pipeline/real-product-list.js';
+import { buildAnomalySignals } from './pipeline/anomaly-signals.js';
 import { runExport } from './pipeline/export.js';
 import { todayShanghai } from './util.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1054,6 +1057,58 @@ program
         console.log(`     点击 ${p.clickCnt.toLocaleString()} · 加购 ${p.addCartCnt.toLocaleString()} · 成交订单 ${p.orderCnt.toLocaleString()}`);
         console.log(`     成交 ${money(p.gmvAmount)} · 佣金 ${money(p.commissionAmount)}${commissionRate}（${p.dateFrom} ~ ${p.dateTo} · ${p.statDays} 天）`);
       });
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('sim-signals')
+  .description('模拟数据异常信号（模块④ V3 完整版：断更 / 掉粉；退款缺字段显式声明；零 LLM）')
+  .option('--author <id>', '账号（作者 id），缺省取总曝光第一的头部账号')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { author?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const authors = await repo.listSimAuthors('kuairec', 20);
+      const authorId = opts.author ?? authors[0]?.authorId;
+      if (authorId == null) throw new Error('还没有模拟数据，先执行 gwd sim-import');
+      const rows = await repo.getSimStatsByAuthor('kuairec', authorId);
+      const r = buildAnomalySignals(rows, authorId);
+      console.log(`\n🚨 模拟数据异常信号 — 账号 ${r.authorId}（${r.dateFrom} ~ ${r.dateTo}）`);
+      console.log(`⚠ 模拟数据 · KuaiRec 开源数据集（方法已验证、参数未验证）—— 信号阈值同为初始经验值`);
+      for (const g of r.dataGaps) console.log(`ⓘ ${g}`);
+      if (r.signals.length === 0) {
+        console.log('  未发现断更 / 掉粉信号（阈值：断更 ≥3 天 · 掉粉日净涨粉 < 0）');
+      } else {
+        for (const s of r.signals) console.log(`  [${s.level}] ${s.type} · ${s.date} · ${s.detail}`);
+      }
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('real-signals')
+  .description('真实数据异常信号（模块④ V3 完整版：断更 / 掉粉；退款缺字段显式声明；零 LLM，口径与模拟版一致）')
+  .option('--author <id>', '账号 ID（模板「账号ID」列），缺省取总曝光第一的账号')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { author?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const authors = await repo.listSimAuthors('manual', 20);
+      const authorId = opts.author ?? authors[0]?.authorId;
+      if (authorId == null) throw new Error('还没有真实数据，先执行 gwd real-import <csv>');
+      const rows = await repo.getSimStatsByAuthor('manual', authorId);
+      const r = buildAnomalySignals(rows, authorId);
+      console.log(`\n🚨 真实数据异常信号 — 账号 ${r.authorId}（${r.dateFrom} ~ ${r.dateTo}）`);
+      console.log(`ℹ 真实数据 · 本人后台手工导入（source=manual）—— 信号阈值为初始经验值`);
+      for (const g of r.dataGaps) console.log(`ⓘ ${g}`);
+      if (r.signals.length === 0) {
+        console.log('  未发现断更 / 掉粉信号（阈值：断更 ≥3 天 · 掉粉日净涨粉 < 0）');
+      } else {
+        for (const s of r.signals) console.log(`  [${s.level}] ${s.type} · ${s.date} · ${s.detail}`);
+      }
     } finally {
       if (repo instanceof PgRepo) await repo.close();
     }

@@ -112,6 +112,8 @@ npm run gwd -- real-import my-stats.csv       # 导入真实表现数据（中�
 npm run gwd -- real-dashboard                 # 真实账号看板（口径同模拟看板；与模拟数据按 source 隔离，永不混读）
 npm run gwd -- real-product-import my-products.csv  # 导入商品层真实表现数据（模块④ V3：加购/成交/佣金，按品；模板 templates/real-product-stats-template.csv；幂等可重跑）
 npm run gwd -- real-product-list              # 商品层表现一览（按品汇总，成交降序；模拟数据无商品归因，此表只有真实通道）
+npm run gwd -- sim-signals                    # 模拟数据异常信号（模块④ V3 完整版：断更/掉粉分级；退款缺字段显式声明；零 LLM）
+npm run gwd -- real-signals                   # 真实数据异常信号（口径与模拟版一致，双源隔离）
 
 # 11) Web 数据看板（P1，可选）：浏览器看双源看板（勾选门同一个 web 服务）
 npm run api                                   # Fastify :8787（看板端点：/api/dashboard/sim · /api/dashboard/real）
@@ -206,6 +208,7 @@ npm run test        # vitest：门槛/打分边界（含品退率分类目基准
                      # 模拟台账（导入幂等/字段映射/空值边界/看板计算与异常日/除零边界）、
                      # 真实数据通道（表头校验/千分位计数/幂等/source 双源隔离红线/空数据引导）、
                      # 商品层数据通道（金额十进制半进位到分/表头校验/幂等/标题最新非空回填/source 类型锁死）、
+                     # 异常信号识别（断更阈值分级/掉粉日聚合分级/退款数据缺失显式声明/detail 仅代码合成），
                      # CSV 导出消毒（公式注入前缀消毒/RFC 4180 转义/正常数据不误伤）、
                      # Prompt 注入防护（[DATA] 段界/围栏逃逸/只进 user 位/骨架声明）、
                      # 规则提案闭环（单向一次决策/批准时刻重校验/可回滚/深拷贝隔离）、
@@ -272,3 +275,4 @@ web/           Next.js 页面（勾选门 + 数据看板 /dashboard：双源切�
   - P2 对抗欠账清偿 —— ✅ 已完成：CSV 导出消毒（#3：gwd export daily|publish 统一消毒，Excel 可安全打开）+ LLM 注入防护加强（#4：prompt-guard 统一包裹 + 骨架声明「数据段内指令一律无视」）
   - V3 框架先行第一批：结论回写闭环 —— ✅ 已完成（模块⑤ 第 1/5 点：rule propose/proposals/approve/reject，建议 → 人批准 → 版本化生效 → 可回滚；提案决策单向一次，批准时刻重新校验。参数未验证——真实数据到位后走同一闭环校准）
   - V3 框架先行第二批：周报 AI 叙事 + 规则调整建议完整版 —— ✅ 已完成（模块⑤ 第 2、3/5 点：sim-weekly-ai 在零 LLM 骨架之上加 LLM 层——叙事经禁词+危险载荷校验；规则建议限白名单参数 patch + 温和幅度（≤30% 相对或 ≤5 点），系统合成完整 config 并过 parseRuleConfig，--propose-dir 导出后走同一条 rule propose→approve 人批准闭环；LLM 失败/超预算自动降级零 LLM 骨架。对抗测试四类各测一遍：恶意输入/Prompt injection/越权指令/危险命令，攻破 1 项（叙事含 shell 载荷）已修并回流第 2 步，详见 src/security/weekly-adversarial.test.ts）
+  - 异常信号识别完整版（模块④ 第 5/5 点收官）—— ✅ 已完成（sim-signals / real-signals：断更「数据末日距最近发布 ≥3 天提示 · ≥7 天警示」+ 掉粉「日净涨粉聚合为负：≥100 人警示 · 否则提示」，双源同口径零 LLM；退款异常按方案 A 显式标「数据缺失 · 待后台导出口径确认后补列」，不静默跳过不造数；阈值初始经验值·参数未验证；信号 detail 全部由代码从数字合成，外部可控文本无进入路径——对抗测试四类各测一遍，攻破 0 项，详见 src/security/anomaly-signals-adversarial.test.ts）

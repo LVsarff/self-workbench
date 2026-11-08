@@ -1,0 +1,8 @@
+异常信号识别完整版（模块④ 收官，39/46→40/46）：sim-signals / real-signals
+
+- buildAnomalySignals（零 LLM，双源同口径）：断更（数据末日距最近发布 ≥3 天提示 · ≥7 天警示，upload_dt 前缀解析容错）+ 掉粉（日净涨粉聚合为负分级：≥100 人警示 · 否则提示）
+- 退款异常按方案 A 显式标「数据缺失 · 待后台导出口径确认后补列」，不静默跳过不造数
+- 信号 detail 全部由代码从数字合成，外部可控文本（caption/标签/uploadDt 载荷）无进入路径
+- CLI sim-signals / real-signals 双命令（source 隔离对齐 dashboard 模式）
+- 契约测试 9 用例 + 四类对抗测试 10 用例（攻破 0 项）
+- 494 测试全绿 + typecheck 通过；阈值初始经验值 · 参数未验证标注保持

@@ -1,4 +1,4 @@
-﻿/**
+﻿﻿/**
  * 周报复盘叙事 Agent（weekly-narrative）测试：
  * - applyRulePatches：白名单 / 值域 / 类型 / 温和幅度 / 业务不变量（宁拒勿错）
  * - validateNarrative：禁词零命中 + 长度
