@@ -225,6 +225,18 @@ npm run test        # vitest：门槛/打分边界（含品退率分类目基准
                      # 对抗性测试 + API 鉴权回归 + 门③/门④ Web 端点（清单校验/幂等/硬拦截/url 白名单/输入白名单）
 ```
 
+### pg 真库集成冒烟（可选，连接真实 PostgreSQL 才运行）
+
+归因通道的 db 层 SQL（参数化 UPDATE 的 `coalesce`、join products 补 external_id、`video_id` 列 + 部分索引、`getSimStatsByVideo` 参数化）只有真库才真实执行，MemoryRepo 测不到。`src/db/pg-repo.attribution.test.ts` 门控在 `DATABASE_URL` 上——**没连库时自动跳过**（不污染 `npm test`），连上才跑：
+
+```bash
+docker compose up -d postgres    # 起库（postgres:16-alpine，127.0.0.1:5432）
+DATABASE_URL=postgres://gwd:gwd@127.0.0.1:5432/gwd \
+  npx vitest run src/db/pg-repo.attribution.test.ts
+```
+
+覆盖：迁移 0012 生效（列 + 索引）、完整状态机落库 + 归因端到端（join 三层 / 率值口径 / kuairec 撞号隔离 / 样本充足判定）、危险 video_id 载荷参数化不产生 SQL 注入。测试按外键依赖逆序清理，重复运行自愈。
+
 ## 安全边界（对抗测试后固化）
 
 已完成一轮红队测试（`src/security/adversarial.test.ts`，恶意输入 / Prompt 注入 / 越权指令 / 危险命令四类）。守住的核心防线与已修复的缺口：
