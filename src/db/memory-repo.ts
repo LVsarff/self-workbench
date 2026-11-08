@@ -13,6 +13,9 @@ import type {
   LlmLogEntry,
   ProductPerfRow,
   ProductPerfSource,
+  CategoryTrendRow,
+  CategoryTrendSource,
+  CategoryTrendSummary,
   ProductPerfSummary,
   PublishRecordInput,
   PublishRecordRow,
@@ -66,6 +69,7 @@ export class MemoryRepo implements Repo {
   private simStats = new Map<string, SimContentStatRow>(); // JSON.stringify([source,videoId,statDate]) → row（幂等键；数组序列化防字段内 `|` 碰撞）
   private simPlayEvents = new Map<string, SimPlayEventRow>(); // JSON.stringify([source,videoId,userId,watchTs]) → row（幂等键，同上）
   private productPerf = new Map<string, ProductPerfRow>(); // JSON.stringify([source,productId,statDate]) → row（幂等键，同上）
+  private categoryTrends = new Map<string, CategoryTrendRow>(); // JSON.stringify([source,category,statDate]) → row（幂等键，同上）
   private ruleVersions: Array<{ version: number; config: RuleConfig; status: string; changeReason: string | null; createdAt: string }> = [];
   private ruleProposals: RuleProposalRow[] = [];
   private llmLogs: Array<LlmLogEntry & { createdAt: string }> = [];
@@ -499,6 +503,62 @@ export class MemoryRepo implements Repo {
   async getProductStats(source: ProductPerfSource, productId: string): Promise<ProductPerfRow[]> {
     return [...this.productPerf.values()]
       .filter((r) => r.source === source && r.productId === productId)
+      .sort((a, b) => a.statDate.localeCompare(b.statDate));
+  }
+
+  // —— 品类趋势背景板（模块① V3：人工导出，source 锁死 manual）——
+  async upsertCategoryTrends(rows: CategoryTrendRow[]): Promise<{ inserted: number; skipped: number }> {
+    let inserted = 0;
+    let skipped = 0;
+    for (const r of rows) {
+      const key = JSON.stringify([r.source, r.category, r.statDate]);
+      if (this.categoryTrends.has(key)) {
+        skipped += 1; // 幂等：已存在跳过，不覆盖（与 PgRepo on conflict do nothing 一致）
+        continue;
+      }
+      this.categoryTrends.set(key, r);
+      inserted += 1;
+    }
+    return { inserted, skipped };
+  }
+
+  async listCategoryTrends(source: CategoryTrendSource, limit: number): Promise<CategoryTrendSummary[]> {
+    const byCategory = new Map<string, CategoryTrendRow[]>();
+    for (const r of this.categoryTrends.values()) {
+      if (r.source !== source) continue;
+      const list = byCategory.get(r.category) ?? [];
+      list.push(r);
+      byCategory.set(r.category, list);
+    }
+    const summaries: CategoryTrendSummary[] = [];
+    for (const [category, list] of byCategory) {
+      const sorted = list.sort((a, b) => a.statDate.localeCompare(b.statDate));
+      const first = sorted[0]!;
+      const last = sorted[sorted.length - 1]!;
+      const prev = sorted.length >= 2 ? sorted[sorted.length - 2]! : null;
+      summaries.push({
+        category,
+        dateFrom: first.statDate,
+        dateTo: last.statDate,
+        statDays: sorted.length,
+        latestIndex: last.searchIndex,
+        prevIndex: prev == null ? null : prev.searchIndex,
+        dayOverDayPct: prev == null || prev.searchIndex === 0 ? null : ((last.searchIndex - prev.searchIndex) / prev.searchIndex) * 100,
+        rangePct: first.searchIndex === 0 ? null : ((last.searchIndex - first.searchIndex) / first.searchIndex) * 100,
+      });
+    }
+    return summaries
+      .sort((a, b) => {
+        const av = a.dayOverDayPct ?? -Infinity;
+        const bv = b.dayOverDayPct ?? -Infinity;
+        return bv - av || a.category.localeCompare(b.category);
+      })
+      .slice(0, limit);
+  }
+
+  async getCategoryTrend(source: CategoryTrendSource, category: string): Promise<CategoryTrendRow[]> {
+    return [...this.categoryTrends.values()]
+      .filter((r) => r.source === source && r.category === category)
       .sort((a, b) => a.statDate.localeCompare(b.statDate));
   }
 

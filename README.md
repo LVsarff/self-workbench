@@ -114,6 +114,8 @@ npm run gwd -- real-product-import my-products.csv  # 导入商品层真实表�
 npm run gwd -- real-product-list              # 商品层表现一览（按品汇总，成交降序；模拟数据无商品归因，此表只有真实通道）
 npm run gwd -- sim-signals                    # 模拟数据异常信号（模块④ V3 完整版：断更/掉粉分级；退款缺字段显式声明；零 LLM）
 npm run gwd -- real-signals                   # 真实数据异常信号（口径与模拟版一致，双源隔离）
+npm run gwd -- trend-import my-trend.csv      # 导入品类趋势数据（模块① V3：巨量算数等人工导出；模板 templates/category-trend-template.csv；幂等可重跑）
+npm run gwd -- trend-list                     # 品类趋势背景板（最新指数/日环比/区间涨跌幅，日环比降序；--category <name> 下钻日序列；仅背景参考不进打分）
 
 # 11) Web 数据看板（P1，可选）：浏览器看双源看板（勾选门同一个 web 服务）
 npm run api                                   # Fastify :8787（看板端点：/api/dashboard/sim · /api/dashboard/real）
@@ -208,7 +210,8 @@ npm run test        # vitest：门槛/打分边界（含品退率分类目基准
                      # 模拟台账（导入幂等/字段映射/空值边界/看板计算与异常日/除零边界）、
                      # 真实数据通道（表头校验/千分位计数/幂等/source 双源隔离红线/空数据引导）、
                      # 商品层数据通道（金额十进制半进位到分/表头校验/幂等/标题最新非空回填/source 类型锁死）、
-                     # 异常信号识别（断更阈值分级/掉粉日聚合分级/退款数据缺失显式声明/detail 仅代码合成），
+                     # 异常信号识别（断更阈值分级/掉粉日聚合分级/退款数据缺失显式声明/detail 仅代码合成）、
+                     # 品类趋势背景板（表头校验/指数非负整数/幂等/日环比与区间涨跌幅除零为 null/口径声明强制），
                      # CSV 导出消毒（公式注入前缀消毒/RFC 4180 转义/正常数据不误伤）、
                      # Prompt 注入防护（[DATA] 段界/围栏逃逸/只进 user 位/骨架声明）、
                      # 规则提案闭环（单向一次决策/批准时刻重校验/可回滚/深拷贝隔离）、
@@ -276,3 +279,4 @@ web/           Next.js 页面（勾选门 + 数据看板 /dashboard：双源切�
   - V3 框架先行第一批：结论回写闭环 —— ✅ 已完成（模块⑤ 第 1/5 点：rule propose/proposals/approve/reject，建议 → 人批准 → 版本化生效 → 可回滚；提案决策单向一次，批准时刻重新校验。参数未验证——真实数据到位后走同一闭环校准）
   - V3 框架先行第二批：周报 AI 叙事 + 规则调整建议完整版 —— ✅ 已完成（模块⑤ 第 2、3/5 点：sim-weekly-ai 在零 LLM 骨架之上加 LLM 层——叙事经禁词+危险载荷校验；规则建议限白名单参数 patch + 温和幅度（≤30% 相对或 ≤5 点），系统合成完整 config 并过 parseRuleConfig，--propose-dir 导出后走同一条 rule propose→approve 人批准闭环；LLM 失败/超预算自动降级零 LLM 骨架。对抗测试四类各测一遍：恶意输入/Prompt injection/越权指令/危险命令，攻破 1 项（叙事含 shell 载荷）已修并回流第 2 步，详见 src/security/weekly-adversarial.test.ts）
   - 异常信号识别完整版（模块④ 第 5/5 点收官）—— ✅ 已完成（sim-signals / real-signals：断更「数据末日距最近发布 ≥3 天提示 · ≥7 天警示」+ 掉粉「日净涨粉聚合为负：≥100 人警示 · 否则提示」，双源同口径零 LLM；退款异常按方案 A 显式标「数据缺失 · 待后台导出口径确认后补列」，不静默跳过不造数；阈值初始经验值·参数未验证；信号 detail 全部由代码从数字合成，外部可控文本无进入路径——对抗测试四类各测一遍，攻破 0 项，详见 src/security/anomaly-signals-adversarial.test.ts）
+  - 品类趋势背景板（模块① 第 15/16 点）—— ✅ 已完成（trend-import / trend-list：巨量算数等外部指数人工导出 CSV →「品类-日」趋势台账（幂等键 source+品类+日）→ 按品汇总最新指数/日环比/区间涨跌幅（除零 → null 不猜），--category 下钻日序列；source 锁死 manual 无爬虫；趋势仅作选品背景参考不进打分（打分接口签名不含趋势参数，编译期结构保证）；口径声明强制「人工导出 · 口径未验证」；对抗测试四类各测一遍，攻破 0 项，详见 src/security/trend-adversarial.test.ts）

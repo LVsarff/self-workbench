@@ -24,6 +24,8 @@
  *   gwd real-product-list [--top]          商品层表现一览（加购/成交/佣金，按品汇总）
  *   gwd sim-signals [--author]             模拟数据异常信号（断更/掉粉；退款缺字段显式声明）
  *   gwd real-signals [--author]            真实数据异常信号（口径与模拟版一致）
+ *   gwd trend-import <csv> [--limit]       导入品类趋势数据（模块① V3：巨量算数人工导出，source=manual，幂等）
+ *   gwd trend-list [--top] [--category]    品类趋势背景板（最新指数/日环比/区间涨跌幅，仅背景参考不进打分）
  *   gwd demo                               无 DB/无 API key 一键体验全流程
  */
 import { Command } from 'commander';
@@ -60,6 +62,8 @@ import { runRealImport } from './pipeline/real-import.js';
 import { runRealDashboard } from './pipeline/real-dashboard.js';
 import { runRealProductImport } from './pipeline/real-product-import.js';
 import { runRealProductList } from './pipeline/real-product-list.js';
+import { runTrendImport } from './pipeline/trend-import.js';
+import { runTrendList, trendDirection } from './pipeline/trend-list.js';
 import { buildAnomalySignals } from './pipeline/anomaly-signals.js';
 import { runExport } from './pipeline/export.js';
 import { todayShanghai } from './util.js';
@@ -1108,6 +1112,58 @@ program
         console.log('  未发现断更 / 掉粉信号（阈值：断更 ≥3 天 · 掉粉日净涨粉 < 0）');
       } else {
         for (const s of r.signals) console.log(`  [${s.level}] ${s.type} · ${s.date} · ${s.detail}`);
+      }
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('trend-import')
+  .description('导入品类趋势数据（模块① V3：巨量算数等平台人工导出 CSV；source=manual；幂等可重跑）')
+  .argument('<csv>', 'CSV 文件路径（中文表头，模板 templates/category-trend-template.csv）')
+  .option('--limit <n>', '最多读取行数（试跑用）')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (file: string, opts: { limit?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const r = await runTrendImport({ repo, file, limit: opts.limit != null ? Number(opts.limit) : undefined });
+      console.log(`\n📥 品类趋势导入完成: 读 ${r.total} 行 · 新增 ${r.inserted} · 跳过(已存在) ${r.skipped} · 作废(非法) ${r.invalid}`);
+      console.log(`   品类 ${r.categoryCount} 个 · 数据日 ${r.dateFrom ?? '-'} ~ ${r.dateTo ?? '-'}`);
+      console.log(`   ⚠ 外部数据 · 人工导出（方法已验证、口径未验证）—— 仅作选品背景参考，不进打分`);
+      if (r.invalid > 0) console.log(`   ⓘ 作废行：品类/日期缺失或搜索指数非法（负数/非数字）—— 指数不猜，宁可丢行不可错数`);
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('trend-list')
+  .description('品类趋势背景板（最新指数 / 日环比 / 区间涨跌幅；--category 下钻单品类日序列；零 LLM）')
+  .option('--top <n>', '最多展示品类数（默认 20）')
+  .option('--category <name>', '指定品类：输出该品类的日序列（下钻）')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { top?: string; category?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const r = await runTrendList({
+        repo,
+        top: opts.top != null ? Number(opts.top) : undefined,
+        category: opts.category,
+      });
+      console.log(`\n📈 品类趋势背景板`);
+      for (const d of r.disclaimers) console.log(`⚠ ${d}`);
+      if (r.series.length > 0) {
+        const s = r.series;
+        console.log(`\n品类「${s[0]!.category}」日序列（${s.length} 天）`);
+        for (const row of s) console.log(`  ${row.statDate}  ${String(row.searchIndex).padStart(8)}`);
+      } else {
+        console.log(`\n品类（${r.summaries.length} 个，按日环比降序；方向标签阈值 ±5% 为初始经验值）`);
+        for (const s of r.summaries) {
+          const dod = s.dayOverDayPct == null ? '-' : `${s.dayOverDayPct >= 0 ? '+' : ''}${s.dayOverDayPct.toFixed(1)}%`;
+          const rng = s.rangePct == null ? '-' : `${s.rangePct >= 0 ? '+' : ''}${s.rangePct.toFixed(1)}%`;
+          console.log(`  ${trendDirection(s.dayOverDayPct)} ${s.category}  最新 ${String(s.latestIndex).padStart(8)}（${s.dateTo}）  日环比 ${dod}  区间 ${rng}  ${s.statDays} 天`);
+        }
       }
     } finally {
       if (repo instanceof PgRepo) await repo.close();

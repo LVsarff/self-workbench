@@ -286,6 +286,38 @@ export interface ProductPerfSummary {
   commissionAmount: number;
 }
 
+// —— 品类趋势背景板（模块① V3：巨量算数人工导出；source 锁死 manual，无爬虫）——
+
+/** 品类趋势来源标记：只有人工导出通道（与商品层同模式，外部指数无自动采集） */
+export type CategoryTrendSource = 'manual';
+
+/** 「品类-日」粒度趋势行（巨量算数搜索指数口径，参数未验证） */
+export interface CategoryTrendRow {
+  source: CategoryTrendSource;
+  category: string;
+  /** YYYY-MM-DD */
+  statDate: string;
+  /** 搜索指数（非负整数） */
+  searchIndex: number;
+}
+
+/** 按品类汇总一览（按日环比降序；趋势背景参考，不进打分） */
+export interface CategoryTrendSummary {
+  category: string;
+  dateFrom: string;
+  dateTo: string;
+  /** 有数据的天数 */
+  statDays: number;
+  /** 最新指数 */
+  latestIndex: number;
+  /** 前一有数据日的指数（仅一天数据为 null） */
+  prevIndex: number | null;
+  /** 日环比 %（prev 为 0 或 null 时为 null——不除零不猜） */
+  dayOverDayPct: number | null;
+  /** 区间涨跌幅 %（最新 vs 最早；首日为 0 时 null） */
+  rangePct: number | null;
+}
+
 /** 播放事件粒度行（模块④ B3 第二批：KuaiRec small_matrix，内容明细下钻用） */
 export interface SimPlayEventRow {
   source: SimSource;
@@ -388,6 +420,14 @@ export interface Repo {
   listProductPerformance(source: ProductPerfSource, limit: number): Promise<ProductPerfSummary[]>;
   /** 单品日序列（按 stat_date 升序；周报/下钻用） */
   getProductStats(source: ProductPerfSource, productId: string): Promise<ProductPerfRow[]>;
+
+  // —— 品类趋势背景板（模块① V3：人工导出，source 锁死 'manual'）——
+  /** 批量落库（幂等键 (source, category, stat_date) 已存在跳过，不覆盖） */
+  upsertCategoryTrends(rows: CategoryTrendRow[]): Promise<{ inserted: number; skipped: number }>;
+  /** 按品类汇总一览（按日环比降序；红线：必须传 source 防混读） */
+  listCategoryTrends(source: CategoryTrendSource, limit: number): Promise<CategoryTrendSummary[]>;
+  /** 单品类日序列（按 stat_date 升序；背景板下钻用） */
+  getCategoryTrend(source: CategoryTrendSource, category: string): Promise<CategoryTrendRow[]>;
 
   // —— LLM 审计 ——
   countLlmCallsToday(): Promise<number>;

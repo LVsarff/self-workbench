@@ -14,6 +14,9 @@ import type {
   ProductPerfRow,
   ProductPerfSource,
   ProductPerfSummary,
+  CategoryTrendRow,
+  CategoryTrendSource,
+  CategoryTrendSummary,
   PublishRecordInput,
   PublishRecordRow,
   ReasonRow,
@@ -878,6 +881,69 @@ export class PgRepo implements Repo {
       orderCnt: Number(r.order_cnt),
       gmvAmount: Number(r.gmv_amount),
       commissionAmount: Number(r.commission_amount),
+    }));
+  }
+
+  // —— 品类趋势背景板（模块① V3：人工导出，source 锁死 manual）——
+  async upsertCategoryTrends(rows: CategoryTrendRow[]): Promise<{ inserted: number; skipped: number }> {
+    if (rows.length === 0) return { inserted: 0, skipped: 0 };
+    // 幂等：(source, category, stat_date) 冲突跳过不覆盖（与 MemoryRepo 语义一致）
+    const { rowCount } = await this.pool.query(
+      `insert into category_trend (source, category, stat_date, search_index)
+       select * from unnest($1::text[], $2::text[], $3::date[], $4::bigint[])
+       on conflict (source, category, stat_date) do nothing`,
+      [rows.map((r) => r.source), rows.map((r) => r.category), rows.map((r) => r.statDate), rows.map((r) => r.searchIndex)],
+    );
+    return { inserted: rowCount ?? 0, skipped: rows.length - (rowCount ?? 0) };
+  }
+
+  async listCategoryTrends(source: CategoryTrendSource, limit: number): Promise<CategoryTrendSummary[]> {
+    // 按品类聚合：最新/前一日指数 + 日环比 + 区间涨跌幅（除数为 0 → null，不猜）
+    const { rows } = await this.pool.query(
+      `select category,
+              min(stat_date)::text as date_from,
+              max(stat_date)::text as date_to,
+              count(*)::int as stat_days,
+              (array_agg(search_index order by stat_date desc))[1] as latest_index,
+              (array_agg(search_index order by stat_date desc))[2] as prev_index,
+              (array_agg(search_index order by stat_date asc))[1] as first_index
+       from category_trend where source = $1 group by category`,
+      [source],
+    );
+    const summaries: CategoryTrendSummary[] = rows.map((r) => {
+      const latestIndex = Number(r.latest_index);
+      const prevIndex = r.prev_index == null ? null : Number(r.prev_index);
+      const firstIndex = Number(r.first_index);
+      return {
+        category: String(r.category),
+        dateFrom: String(r.date_from),
+        dateTo: String(r.date_to),
+        statDays: Number(r.stat_days),
+        latestIndex,
+        prevIndex,
+        dayOverDayPct: prevIndex == null || prevIndex === 0 ? null : ((latestIndex - prevIndex) / prevIndex) * 100,
+        rangePct: firstIndex === 0 ? null : ((latestIndex - firstIndex) / firstIndex) * 100,
+      };
+    });
+    return summaries
+      .sort((a, b) => {
+        const av = a.dayOverDayPct ?? -Infinity;
+        const bv = b.dayOverDayPct ?? -Infinity;
+        return bv - av || a.category.localeCompare(b.category);
+      })
+      .slice(0, limit);
+  }
+
+  async getCategoryTrend(source: CategoryTrendSource, category: string): Promise<CategoryTrendRow[]> {
+    const { rows } = await this.pool.query(
+      `select * from category_trend where source = $1 and category = $2 order by stat_date asc`,
+      [source, category],
+    );
+    return rows.map((r) => ({
+      source: 'manual',
+      category: String(r.category),
+      statDate: String(r.stat_date),
+      searchIndex: Number(r.search_index),
     }));
   }
 
