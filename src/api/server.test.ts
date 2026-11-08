@@ -503,3 +503,134 @@ describe('发布队列/台账端点（门④ Web）：/api/publish · /api/publi
     await close();
   });
 });
+
+// —— 归因端点（模块⑤：published 带 videoId · /api/attribution · /api/attribution-link）——
+
+describe('归因端点（模块⑤ Web）：/api/published videoId · /api/attribution · /api/attribution-link', () => {
+  /** A/xhs 已发布（带 videoId + 窗口内 manual 表现数据）的仓储 */
+  async function attributionReadyRepo() {
+    const repo = await publishReadyRepo();
+    await syncPublishQueue({ repo, date: GATE3_DATE });
+    await repo.upsertSimStats([
+      stat({ source: 'manual', videoId: 'vx1', authorId: 'me', statDate: GATE3_DATE, showCnt: 1000, playCnt: 500, completePlayCnt: 300, likeCnt: 50, commentCnt: 5, shareCnt: 5, followCnt: 10, collectCnt: 8 }),
+    ]);
+    return repo;
+  }
+
+  it('POST /api/published 带 videoId：回填落锚点 → /api/attribution 立即可归因', async () => {
+    delete process.env.GWD_API_TOKEN;
+    const repo = await attributionReadyRepo();
+    const { app, close } = await buildServer(repo);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/published',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', url: 'https://www.xiaohongshu.com/note/abc', videoId: 'vx1', publishedAt: '2026-01-05T21:00:00+08:00' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().record.videoId).toBe('vx1');
+
+    const report = await app.inject({ method: 'GET', url: '/api/attribution' });
+    expect(report.statusCode).toBe(200);
+    const body = report.json();
+    expect(body.disclaimer).toContain('真实通道');
+    expect(body.contents).toHaveLength(1);
+    expect(body.contents[0].videoId).toBe('vx1');
+    expect(body.contents[0].totals.playCnt).toBe(500);
+    expect(body.products).toHaveLength(1);
+    expect(body.platforms).toHaveLength(1);
+    await app.close();
+    await close();
+  });
+
+  it('POST /api/published videoId 非法载荷 / null → 400（不静默吞）', async () => {
+    delete process.env.GWD_API_TOKEN;
+    const repo = await attributionReadyRepo();
+    const { app, close } = await buildServer(repo);
+    const injected = await app.inject({
+      method: 'POST',
+      url: '/api/published',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', url: 'https://www.xiaohongshu.com/note/abc', videoId: "1' OR '1'='1" },
+    });
+    expect(injected.statusCode).toBe(400);
+    expect(injected.json().error).toContain('videoId');
+
+    const nullVideo = await app.inject({
+      method: 'POST',
+      url: '/api/published',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', url: 'https://www.xiaohongshu.com/note/abc', videoId: null },
+    });
+    expect(nullVideo.statusCode).toBe(400);
+    await app.close();
+    await close();
+  });
+
+  it('GET /api/attribution：days 越界 / platform 非法 → 400；空台账 → 200 空报表', async () => {
+    delete process.env.GWD_API_TOKEN;
+    const { app, close } = await buildServer(new MemoryRepo());
+    expect((await app.inject({ method: 'GET', url: '/api/attribution?days=0' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/attribution?days=91' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/attribution?platform=xhs' })).statusCode).toBe(400);
+    const empty = await app.inject({ method: 'GET', url: '/api/attribution' });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json().contents).toEqual([]);
+    await app.close();
+    await close();
+  });
+
+  it('POST /api/attribution-link：published 记录补链 → 200；pending / 非法 videoId / 非法 platform → 4xx', async () => {
+    delete process.env.GWD_API_TOKEN;
+    const repo = await attributionReadyRepo();
+    const { app, close } = await buildServer(repo);
+    // 先回填发布（不带 videoId）
+    await app.inject({
+      method: 'POST',
+      url: '/api/published',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', url: 'https://www.xiaohongshu.com/note/abc', publishedAt: '2026-01-05T21:00:00+08:00' },
+    });
+    const link = await app.inject({
+      method: 'POST',
+      url: '/api/attribution-link',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', videoId: ' vx1 ' },
+    });
+    expect(link.statusCode).toBe(200);
+    expect(link.json().videoId).toBe('vx1');
+
+    // A/douyin 还是 pending → 409
+    const pending = await app.inject({
+      method: 'POST',
+      url: '/api/attribution-link',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'douyin', videoId: 'vx1' },
+    });
+    expect(pending.statusCode).toBe(409);
+    expect(pending.json().error).toContain('尚未回填发布');
+
+    // 非法载荷 → 400
+    const badVideo = await app.inject({
+      method: 'POST',
+      url: '/api/attribution-link',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', videoId: '<script>' },
+    });
+    expect(badVideo.statusCode).toBe(400);
+
+    const badPlatform = await app.inject({
+      method: 'POST',
+      url: '/api/attribution-link',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xhs', videoId: 'vx1' },
+    });
+    expect(badPlatform.statusCode).toBe(400);
+    await app.close();
+    await close();
+  });
+
+  it('配置 token：归因端点同样受鉴权保护', async () => {
+    process.env.GWD_API_TOKEN = 'secret-token';
+    const { app, close } = await buildServer(await attributionReadyRepo());
+    expect((await app.inject({ method: 'GET', url: '/api/attribution' })).statusCode).toBe(401);
+    expect(
+      (await app.inject({ method: 'POST', url: '/api/attribution-link', payload: { externalId: 'A', platform: 'douyin', videoId: 'vx1' } })).statusCode,
+    ).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/api/attribution', headers: { 'x-api-token': 'secret-token' } })).statusCode).toBe(200);
+    await app.close();
+    await close();
+  });
+});

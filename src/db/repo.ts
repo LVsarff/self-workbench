@@ -144,10 +144,19 @@ export interface PublishRecordRow {
   url: string | null;
   /** 回填时如实记录是否勾了平台「AI 生成」标注（null = 未回填） */
   aiLabeled: boolean | null;
+  /** 平台侧内容标识（抖音视频 id / 小红书笔记 id）：归因 join 锚点（模块⑤；null = 未回填/未补链） */
+  videoId: string | null;
   createdAt: string;
 }
 
-export type PublishRecordInput = Omit<PublishRecordRow, 'id' | 'status' | 'publishedAt' | 'url' | 'aiLabeled' | 'createdAt'>;
+export type PublishRecordInput = Omit<PublishRecordRow, 'id' | 'status' | 'publishedAt' | 'url' | 'aiLabeled' | 'videoId' | 'createdAt'>;
+
+/** 已发布记录 + 品标识（归因读取用：join products 补 external_id/title，避免逐日查草稿） */
+export interface AttributionPublishRow {
+  record: PublishRecordRow;
+  externalId: string;
+  title: string | null;
+}
 
 /** 深度调研摘要（模块① V2）：LLM 从人工抄录原文提炼，人终判 */
 export interface ResearchSummary {
@@ -388,8 +397,12 @@ export interface Repo {
   /** 建 pending 记录（幂等键 draft_id 已存在抛错；调用方先查重） */
   createPublishRecord(rec: PublishRecordInput): Promise<PublishRecordRow>;
   getPublishRecords(date: string): Promise<PublishRecordRow[]>;
-  /** 人工发布后回填：pending → published（记录不存在 / 已回填抛错，幂等拒绝） */
-  recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean }): Promise<void>;
+  /** 人工发布后回填：pending → published（记录不存在 / 已回填抛错，幂等拒绝）；videoId 为归因 join 锚点，可随回填写入 */
+  recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean; videoId?: string | null }): Promise<void>;
+  /** 全部已发布记录 + 品标识（归因读取；按 published_at 升序）。真实通道专用（模拟数据无归因） */
+  listPublishedForAttribution(): Promise<AttributionPublishRow[]>;
+  /** 补链/修正 video_id（幂等可重跑；归因 join 锚点不是合规审计字段，允许人工修正） */
+  setPublishVideoId(id: string, videoId: string): Promise<void>;
 
   // —— 深度调研摘要（模块① V2）——
   /** 一品一份（幂等键 product_id；无则 null） */

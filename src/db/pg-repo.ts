@@ -5,6 +5,7 @@ import { RuleConfigSchema, parseRuleConfig } from '../core/rule-config.js';
 import type { DailyList, DailyListItem, DuplicateHit, ProductSnapshot, SimilarProduct } from '../core/types.js';
 import type { Platform } from '../core/types.js';
 import type {
+  AttributionPublishRow,
   ContentDecisionInput,
   ContentDecisionRow,
   ContentDraftInput,
@@ -588,6 +589,7 @@ export class PgRepo implements Repo {
       publishedAt: r.published_at == null ? null : new Date(r.published_at).toISOString(),
       url: (r.url ?? null) as string | null,
       aiLabeled: r.ai_labeled == null ? null : Boolean(r.ai_labeled),
+      videoId: (r.video_id ?? null) as string | null,
       createdAt: new Date(r.created_at).toISOString(),
     };
   }
@@ -596,7 +598,7 @@ export class PgRepo implements Repo {
     const { rows } = await this.pool.query(
       `insert into publish_records (draft_id, run_id, batch_date, product_id, platform, status, planned_at)
        values ($1,$2,$3,$4,$5,'pending',$6)
-       returning id, draft_id, run_id, batch_date, product_id, platform, status, planned_at, published_at, url, ai_labeled, created_at`,
+       returning id, draft_id, run_id, batch_date, product_id, platform, status, planned_at, published_at, url, ai_labeled, video_id, created_at`,
       [rec.draftId, rec.runId, rec.batchDate, rec.productId, rec.platform, rec.plannedAt],
     );
     return this.mapPublishRow(rows[0]!); // 同 draft_id 重复插入由 unique 约束抛错（调用方先查重）
@@ -604,7 +606,7 @@ export class PgRepo implements Repo {
 
   async getPublishRecords(date: string): Promise<PublishRecordRow[]> {
     const { rows } = await this.pool.query(
-      `select id, draft_id, run_id, batch_date, product_id, platform, status, planned_at, published_at, url, ai_labeled, created_at
+      `select id, draft_id, run_id, batch_date, product_id, platform, status, planned_at, published_at, url, ai_labeled, video_id, created_at
        from publish_records
        where batch_date = $1
        order by created_at asc, id asc`,
@@ -613,7 +615,7 @@ export class PgRepo implements Repo {
     return rows.map((r) => this.mapPublishRow(r));
   }
 
-  async recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean }): Promise<void> {
+  async recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean; videoId?: string | null }): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
@@ -621,9 +623,10 @@ export class PgRepo implements Repo {
       if (rows.length === 0) throw new Error(`发布记录不存在: ${id}`);
       if (String(rows[0]!.status) !== 'pending') throw new Error(`发布记录已回填过（幂等拒绝）: ${id}`);
       await client.query(
-        `update publish_records set status = 'published', published_at = $2, url = $3, ai_labeled = $4, updated_at = now()
+        `update publish_records set status = 'published', published_at = $2, url = $3, ai_labeled = $4, updated_at = now(),
+           video_id = coalesce($5, video_id)
          where id = $1`,
-        [id, patch.publishedAt, patch.url, patch.aiLabeled],
+        [id, patch.publishedAt, patch.url, patch.aiLabeled, patch.videoId ?? null],
       );
       await client.query('commit');
     } catch (e) {
@@ -632,6 +635,32 @@ export class PgRepo implements Repo {
     } finally {
       client.release();
     }
+  }
+
+  async listPublishedForAttribution(): Promise<AttributionPublishRow[]> {
+    // join products 补 external_id/title（归因读取一条 SQL 拿全，避免逐日查草稿）
+    const { rows } = await this.pool.query(
+      `select pr.id, pr.draft_id, pr.run_id, pr.batch_date, pr.product_id, pr.platform, pr.status,
+              pr.planned_at, pr.published_at, pr.url, pr.ai_labeled, pr.video_id, pr.created_at,
+              p.external_id, p.title
+       from publish_records pr
+       join products p on p.id = pr.product_id
+       where pr.status = 'published'
+       order by pr.published_at asc, pr.id asc`,
+    );
+    return rows.map((r: any) => ({
+      record: this.mapPublishRow(r),
+      externalId: String(r.external_id),
+      title: r.title == null ? null : String(r.title),
+    }));
+  }
+
+  async setPublishVideoId(id: string, videoId: string): Promise<void> {
+    const { rowCount } = await this.pool.query(
+      `update publish_records set video_id = $2, updated_at = now() where id = $1`,
+      [id, videoId],
+    );
+    if (rowCount === 0) throw new Error(`发布记录不存在: ${id}`);
   }
 
   // —— 深度调研摘要（模块① V2）——

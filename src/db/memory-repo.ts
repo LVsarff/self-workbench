@@ -4,6 +4,7 @@ import { parseRuleConfig } from '../core/rule-config.js';
 import type { DailyList, DailyListItem, ProductSnapshot, SimilarProduct, Trend } from '../core/types.js';
 import type { AgentReason } from '../core/template-reason.js';
 import type {
+  AttributionPublishRow,
   ContentDecisionInput,
   ContentDecisionRow,
   ContentDraftInput,
@@ -365,6 +366,7 @@ export class MemoryRepo implements Repo {
       publishedAt: null,
       url: null,
       aiLabeled: null,
+      videoId: null,
       createdAt: new Date().toISOString(),
     };
     this.publishRecords.set(row.id, row);
@@ -377,7 +379,7 @@ export class MemoryRepo implements Repo {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   }
 
-  async recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean }): Promise<void> {
+  async recordPublish(id: string, patch: { url: string; publishedAt: string; aiLabeled: boolean; videoId?: string | null }): Promise<void> {
     const row = this.publishRecords.get(id);
     if (!row) throw new Error(`发布记录不存在: ${id}`);
     if (row.status !== 'pending') throw new Error(`发布记录已回填过（幂等拒绝）: ${id}`);
@@ -385,6 +387,23 @@ export class MemoryRepo implements Repo {
     row.publishedAt = patch.publishedAt;
     row.url = patch.url;
     row.aiLabeled = patch.aiLabeled;
+    if (patch.videoId != null) row.videoId = patch.videoId;
+  }
+
+  async listPublishedForAttribution(): Promise<AttributionPublishRow[]> {
+    const out: AttributionPublishRow[] = [];
+    for (const r of this.publishRecords.values()) {
+      if (r.status !== 'published') continue;
+      const product = this.products.get(r.productId);
+      out.push({ record: { ...r }, externalId: product?.externalId ?? '', title: product?.title ?? null });
+    }
+    return out.sort((a, b) => (a.record.publishedAt ?? '').localeCompare(b.record.publishedAt ?? '') || a.record.id.localeCompare(b.record.id));
+  }
+
+  async setPublishVideoId(id: string, videoId: string): Promise<void> {
+    const row = this.publishRecords.get(id);
+    if (!row) throw new Error(`发布记录不存在: ${id}`);
+    row.videoId = videoId; // 幂等可重跑（同值无变化；人工修正归因锚点允许覆盖）
   }
 
   // —— 深度调研摘要（模块① V2）——

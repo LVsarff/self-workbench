@@ -13,6 +13,7 @@
 import type { ContentDraftRow, PublishRecordRow, Repo } from '../db/repo.js';
 import type { Platform } from '../core/types.js';
 import { nextPublishSlot, shanghaiSlotToIso, suggestSlots } from '../core/publish-slots.js';
+import { parseVideoId } from '../core/video-id.js';
 import { todayShanghai } from '../util.js';
 
 /** pending 超 24h 未发布视为超时（提醒层，不阻塞不惩罚） */
@@ -114,6 +115,8 @@ export interface RecordPublishOptions {
   publishedAt?: string;
   /** 是否已在平台勾选「AI 生成」标注（默认 false，如实回填） */
   aiLabeled?: boolean;
+  /** 平台侧内容标识（视频/笔记 id；模块⑤ 归因 join 锚点，回填时顺手带上，漏了可 gwd attribution-link 补链） */
+  videoId?: string;
   now?: Date;
 }
 
@@ -136,6 +139,14 @@ export async function recordPublish(opts: RecordPublishOptions): Promise<RecordP
     throw new Error(`笔记链接须以 http:// 或 https:// 开头（收到: "${url.slice(0, 50)}"）`);
   }
   if (/[\x00-\x1f\x7f]/.test(url)) throw new Error('笔记链接不能包含换行/控制字符');
+
+  // 归因锚点白名单校验（入口拦住，不回显原值）
+  let videoId: string | null = null;
+  if (opts.videoId !== undefined && opts.videoId !== '') {
+    const parsed = parseVideoId(opts.videoId);
+    if (!parsed.ok) throw new Error(parsed.error);
+    videoId = parsed.value;
+  }
 
   let publishedAt: string;
   if (opts.publishedAt !== undefined && opts.publishedAt !== '') {
@@ -167,11 +178,11 @@ export async function recordPublish(opts: RecordPublishOptions): Promise<RecordP
   const record = records.find((r) => r.draftId === draft.id);
   if (!record) throw new Error(`${opts.externalId} 没有待发布记录（先执行 gwd publish-sync）`);
 
-  await opts.repo.recordPublish(record.id, { url, publishedAt, aiLabeled: opts.aiLabeled ?? false });
+  await opts.repo.recordPublish(record.id, { url, publishedAt, aiLabeled: opts.aiLabeled ?? false, videoId });
   return {
     date,
     externalId: opts.externalId,
     platform: opts.platform,
-    record: { ...record, status: 'published', url, publishedAt, aiLabeled: opts.aiLabeled ?? false },
+    record: { ...record, status: 'published', url, publishedAt, aiLabeled: opts.aiLabeled ?? false, videoId },
   };
 }

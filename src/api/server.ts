@@ -11,7 +11,9 @@
  * POST /api/discard  { date?, externalId, platform, note? }              弃用草稿（决策流水 append-only）
  * GET  /api/publish?date=              待发布队列 + 已发布台账（P1，只读；发布动作永远人工）
  * POST /api/publish-sync { date? }      门③ confirmed → pending 队列（幂等，可重跑补漏）
- * POST /api/published { date?, externalId, platform, url, publishedAt?, aiLabeled? }  回填台账（一条只回填一次）
+ * POST /api/published { date?, externalId, platform, url, publishedAt?, aiLabeled?, videoId? }  回填台账（一条只回填一次）
+ * GET  /api/attribution?days=&platform=   内容层表现归因（模块⑤，只读；发布台账 join 真实表现 by video_id）
+ * POST /api/attribution-link { date?, externalId, platform, videoId }  补链归因 video_id（幂等可重跑）
  *
  * 鉴权（对抗测试 P1 修复）：
  * - 默认绑定 127.0.0.1（单人本机场景，免 token）
@@ -28,6 +30,8 @@ import { runSimDashboard } from '../pipeline/sim-dashboard.js';
 import { runRealDashboard } from '../pipeline/real-dashboard.js';
 import { confirmContentDraft, discardContentDraft, GATE3_CHECKLIST } from '../pipeline/content-confirm.js';
 import { listPublishQueue, recordPublish, syncPublishQueue } from '../pipeline/publish.js';
+import { buildAttribution, linkVideoId } from '../pipeline/attribution.js';
+import { parseVideoId } from '../core/video-id.js';
 import { isValidBatchDate, todayShanghai } from '../util.js';
 
 loadEnv();
@@ -212,7 +216,7 @@ export async function buildServer(repo?: Repo) {
   // —— 发布队列 + 台账（门④：发布动作永远人工，系统只做记录与提醒）——
   // 入口白名单先于管线：url 协议/长度/控制字符在 API 层 400 且不回显原文（管线校验保留给 CLI 路径）
   function checkPublishBody(body: Record<string, unknown>):
-    | { ok: true; date: string; externalId: string; platform: string; url: string; publishedAt?: string; aiLabeled?: boolean }
+    | { ok: true; date: string; externalId: string; platform: string; url: string; publishedAt?: string; aiLabeled?: boolean; videoId?: string }
     | { ok: false; error: string } {
     if (body.date != null && typeof body.date !== 'string') return { ok: false, error: 'date 参数无效（只接受 YYYY-MM-DD 字符串）' };
     const date = typeof body.date === 'string' && body.date !== '' ? body.date : todayShanghai();
@@ -239,6 +243,14 @@ export async function buildServer(repo?: Repo) {
     if (body.aiLabeled !== undefined && typeof body.aiLabeled !== 'boolean') {
       return { ok: false, error: 'aiLabeled 参数无效（只接受布尔值）' };
     }
+    // 归因锚点（模块⑤）：undefined = 不回填；null / 非字符串 / 非法载荷一律 400（不静默吞）
+    let videoId: string | undefined;
+    if (body.videoId !== undefined) {
+      if (body.videoId === null || body.videoId === '') return { ok: false, error: 'videoId 参数无效（不回填请省略该字段，不要传 null/空串）' };
+      const parsed = parseVideoId(body.videoId);
+      if (!parsed.ok) return { ok: false, error: parsed.error };
+      videoId = parsed.value;
+    }
     return {
       ok: true,
       date,
@@ -247,6 +259,7 @@ export async function buildServer(repo?: Repo) {
       url,
       publishedAt: typeof body.publishedAt === 'string' && body.publishedAt !== '' ? body.publishedAt : undefined,
       aiLabeled: body.aiLabeled === true,
+      videoId,
     };
   }
 
@@ -269,7 +282,7 @@ export async function buildServer(repo?: Repo) {
     return result;
   });
 
-  app.post<{ Body: { date?: string; externalId?: string; platform?: string; url?: string; publishedAt?: string; aiLabeled?: boolean } }>(
+  app.post<{ Body: { date?: string; externalId?: string; platform?: string; url?: string; publishedAt?: string; aiLabeled?: boolean; videoId?: string } }>(
     '/api/published',
     async (req, reply) => {
       const body = req.body ?? {};
@@ -284,11 +297,71 @@ export async function buildServer(repo?: Repo) {
           url: parsed.url,
           publishedAt: parsed.publishedAt,
           aiLabeled: parsed.aiLabeled,
+          videoId: parsed.videoId,
         });
         // record 含完整 PublishRecordRow（id/runId 等），Web 台账展示够用
         return { date: result.date, externalId: result.externalId, platform: result.platform, record: result.record };
       } catch (e) {
         // 管线错误 = 状态冲突（未确认/无队列记录/重复回填），消息只含已过白名单的输入
+        return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
+
+  // —— 内容层表现归因（模块⑤：只读报表，source 锁 manual，零 LLM）——
+  app.get('/api/attribution', async (req, reply) => {
+    const q = req.query as { days?: string; platform?: string };
+    let days: number | undefined;
+    if (q.days != null && q.days !== '') {
+      const n = Number(q.days);
+      if (!Number.isInteger(n) || n < 1 || n > 90) {
+        return reply.code(400).send({ error: 'days 参数无效（1-90 的整数）' });
+      }
+      days = n;
+    }
+    let platform: string | undefined;
+    if (q.platform != null && q.platform !== '') {
+      if (typeof q.platform !== 'string' || !PLATFORMS.has(q.platform)) {
+        return reply.code(400).send({ error: 'platform 无效（只接受 xiaohongshu | douyin）' });
+      }
+      platform = q.platform;
+    }
+    try {
+      const report = await buildAttribution({
+        repo: db,
+        days,
+        platform: platform as 'xiaohongshu' | 'douyin' | undefined,
+      });
+      return report;
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post<{ Body: { date?: string; externalId?: string; platform?: string; videoId?: string } }>(
+    '/api/attribution-link',
+    async (req, reply) => {
+      const body = req.body ?? {};
+      if (body.date != null && typeof body.date !== 'string') return reply.code(400).send({ error: 'date 参数无效（只接受 YYYY-MM-DD 字符串）' });
+      const date = typeof body.date === 'string' && body.date !== '' ? body.date : todayShanghai();
+      if (!isValidBatchDate(date)) return reply.code(400).send({ error: 'date 格式无效（须 YYYY-MM-DD）' });
+      const id = checkExternalId(body.externalId);
+      if (!id.ok) return reply.code(400).send({ error: id.error });
+      if (typeof body.platform !== 'string' || !PLATFORMS.has(body.platform)) {
+        return reply.code(400).send({ error: 'platform 无效（只接受 xiaohongshu | douyin）' });
+      }
+      const parsedVideo = parseVideoId(body.videoId);
+      if (!parsedVideo.ok) return reply.code(400).send({ error: parsedVideo.error });
+      try {
+        const result = await linkVideoId({
+          repo: db,
+          date,
+          externalId: id.value,
+          platform: body.platform as 'xiaohongshu' | 'douyin',
+          videoId: parsedVideo.value,
+        });
+        return result;
+      } catch (e) {
         return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) });
       }
     },

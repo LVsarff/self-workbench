@@ -15,7 +15,9 @@
  *   gwd discard <id> <platform> [--date]   弃用草稿（记入决策流水）
  *   gwd publish-sync [--date]              发布队列同步：已确认内容 → 待发布（B2）
  *   gwd publish-list [--date]              待发布队列 + 发布台账（建议时段/超时警示）
- *   gwd published <id> <platform> --url    人工发布后回填台账（链接/时间/AI 标注）
+ *   gwd published <id> <platform> --url    人工发布后回填台账（链接/时间/AI 标注/--video-id 归因锚点）
+ *   gwd attribution [--days] [--platform]  内容层表现归因（模块⑤：发布台账 join 真实表现，零 LLM）
+ *   gwd attribution-link <id> <platform> --video-id  补链/修正归用 video_id（幂等可重跑）
  *   gwd sim-import [--dir] [--limit]       导入 KuaiRec 模拟表现数据（B3 第一批，幂等）
  *   gwd sim-dashboard [--author]           模拟数据账号看板（日趋势/Top 内容/异常日）
  *   gwd real-import <csv> [--limit]        导入本人账号真实表现数据（P0，source=manual，幂等）
@@ -42,6 +44,7 @@ import { runDailyScan } from './pipeline/daily-scan.js';
 import { runContentGen } from './pipeline/content-gen.js';
 import { confirmContentDraft, discardContentDraft, GATE3_CHECKLIST } from './pipeline/content-confirm.js';
 import { listPublishQueue, recordPublish, syncPublishQueue, type PublishQueueItem } from './pipeline/publish.js';
+import { buildAttribution, linkVideoId, PRODUCT_SAMPLE_MIN, type AttributionReport } from './pipeline/attribution.js';
 import { isoToShanghaiDisplay } from './core/publish-slots.js';
 import { selectProducts } from './pipeline/select.js';
 import { createReasonAgentFromEnv, createScriptedReasonAgent } from './agent/reason-agent.js';
@@ -198,6 +201,61 @@ function printPublishQueue(items: PublishQueueItem[]): void {
   }
   if (pending.length > 0) {
     console.log(`\n发布: 复制内容 → 平台发布并勾选「AI 生成」标注 → gwd published 回填`);
+  }
+}
+
+/** 内容层归因报表展示（模块⑤：真实通道，结论带样本量；口径声明强制显示） */
+function printAttribution(report: AttributionReport): void {
+  const pct = (v: number | null): string => (v == null ? '  —  ' : `${(v * 100).toFixed(1)}%`);
+  const num = (v: number): string => v.toLocaleString();
+  console.log(`\n🔍 内容层表现归因 — 窗口 ${report.days} 天（发布日 + ${report.days - 1} 天）· 生成于 ${isoToShanghaiDisplay(report.generatedAt)}`);
+  console.log(`⚠ ${report.disclaimer}`);
+
+  if (report.contents.length === 0) {
+    console.log('\n没有可归因的已发布内容（前提：gwd published 回填发布 + --video-id / attribution-link 补链 + gwd real-import 导表现数据）');
+  } else {
+    console.log(`\n—— 逐内容归因（按窗口播放降序，共 ${report.contents.length} 条）——`);
+    report.contents.forEach((c, idx) => {
+      console.log(
+        `  ${String(idx + 1).padStart(2)}. ${c.externalId} [${PLATFORM_LABEL[c.platform]}]  发布 ${c.windowFrom}  窗口 ${c.windowFrom} ~ ${c.windowTo}  数据 ${c.statDays} 天`,
+      );
+      console.log(
+        `      ${c.title?.slice(0, 24) ?? ''}  video_id ${c.videoId}`,
+      );
+      console.log(
+        `      曝光 ${num(c.totals.showCnt)}  播放 ${num(c.totals.playCnt)}  完播率 ${pct(c.completeRate)}  互动率 ${pct(c.interactionRate)}  涨粉 ${num(c.totals.followCnt)}`,
+      );
+    });
+  }
+
+  if (report.products.length > 0) {
+    console.log(`\n—— 品级汇总（按窗口播放降序；小样本护栏：<${PRODUCT_SAMPLE_MIN} 条内容只展示不排名）——`);
+    report.products.forEach((p) => {
+      const flag = p.attributedCount === 0 ? '（无归因数据）' : p.sampleSufficient ? '' : '  ⚠ 样本不足·不排名';
+      console.log(`  ${p.externalId}  播放 ${num(p.totals.playCnt)}  完播率 ${pct(p.completeRate)}  互动率 ${pct(p.interactionRate)}  内容 ${p.attributedCount}/${p.contentCount} 条${flag}`);
+      if (p.title) console.log(`      ${p.title.slice(0, 30)}`);
+    });
+  }
+
+  if (report.platforms.length > 0) {
+    console.log('\n—— 平台汇总 ——');
+    for (const pl of report.platforms) {
+      console.log(`  ${PLATFORM_LABEL[pl.platform]}: 归因内容 ${pl.attributedCount} 条  曝光 ${num(pl.totals.showCnt)}  播放 ${num(pl.totals.playCnt)}  涨粉 ${num(pl.totals.followCnt)}`);
+    }
+  }
+
+  const issues = report.issues;
+  if (issues.noVideoId.length + issues.noStats.length + issues.outOfWindow.length > 0) {
+    console.log('\n—— 未归因清单（不静默跳过，逐条给原因）——');
+    for (const i of issues.noVideoId) {
+      console.log(`  ⚠ ${i.externalId} [${PLATFORM_LABEL[i.platform]}] 发布 ${isoToShanghaiDisplay(i.publishedAt)} 未回填 video_id → gwd attribution-link ${i.externalId} ${i.platform} --video-id <平台内容id>`);
+    }
+    for (const i of issues.noStats) {
+      console.log(`  ⚠ ${i.externalId} [${PLATFORM_LABEL[i.platform]}] video_id ${i.videoId} 在真实表现台账无数据 → 先 gwd real-import 导后台 CSV`);
+    }
+    for (const i of issues.outOfWindow) {
+      console.log(`  ⚠ ${i.externalId} [${PLATFORM_LABEL[i.platform]}] video_id ${i.videoId} 窗口内 0 天（历史 ${i.statDays} 天）→ 检查发布时间回填是否正确/后台是否已导出该区间`);
+    }
   }
 }
 
@@ -690,13 +748,14 @@ program
 
 program
   .command('published <externalId> <platform>')
-  .description('人工发布后回填台账（门④）：链接 / 时间 / AI 标注，一条只回填一次')
+  .description('人工发布后回填台账（门④）：链接 / 时间 / AI 标注 / 视频ID（归因锚点），一条只回填一次')
   .requiredOption('--url <url>', '已发布笔记/视频链接')
   .option('--at <iso>', '实际发布时间（ISO 格式，默认现在）')
   .option('--ai-labeled', '已在平台勾选「AI 生成」标注（默认未标注，如实回填）')
+  .option('--video-id <id>', '平台侧内容标识（抖音视频id/小红书笔记id；归因 join 锚点，漏了可 attribution-link 补）')
   .option('--date <date>', '批次日期 YYYY-MM-DD，默认今天')
   .option('--db <mode>', 'pg | memory')
-  .action(async (externalId: string, platformRaw: string, opts: { url: string; at?: string; aiLabeled?: boolean; date?: string; db?: string }) => {
+  .action(async (externalId: string, platformRaw: string, opts: { url: string; at?: string; aiLabeled?: boolean; videoId?: string; date?: string; db?: string }) => {
     const repo = createRepo(opts.db);
     const platform = parsePlatform(platformRaw);
     const result = await recordPublish({
@@ -707,11 +766,45 @@ program
       url: opts.url,
       publishedAt: opts.at,
       aiLabeled: opts.aiLabeled ?? false,
+      videoId: opts.videoId,
     });
     console.log(`✅ 台账已回填: ${result.date} ${result.externalId} ${PLATFORM_LABEL[result.platform]}`);
     console.log(`   链接 ${result.record.url}`);
     console.log(`   时间 ${isoToShanghaiDisplay(result.record.publishedAt!)}  AI 标注: ${result.record.aiLabeled ? '已勾选' : '未勾选 ⚠（平台要求 AI 内容须标注，未勾选请补）'}`);
+    console.log(`   视频ID ${result.record.videoId ?? '未回填（gwd attribution-link 可后补；回填后 gwd attribution 即可归因）'}`);
     console.log('   （内容↔品↔平台↔时间已绑定，V3 归因的事实表就位）');
+    if (repo instanceof PgRepo) await repo.close();
+  });
+
+program
+  .command('attribution')
+  .description('内容层表现归因（模块⑤：发布台账 join 真实表现台账 by video_id；逐内容/品级/平台三层，零 LLM）')
+  .option('--days <n>', '归因窗口天数（默认 7，1-90）', (v: string) => Number(v))
+  .option('--platform <platform>', '只看单平台（xiaohongshu|douyin），缺省双平台')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { days?: number; platform?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const platform = opts.platform === undefined ? undefined : parsePlatform(opts.platform);
+      const report = await buildAttribution({ repo, days: opts.days, platform });
+      printAttribution(report);
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('attribution-link <externalId> <platform>')
+  .description('补链/修正归因 video_id（发布时漏带 → 发布后从平台拿到 id 再补；幂等可重跑）')
+  .requiredOption('--video-id <id>', '平台侧内容标识（抖音视频id/小红书笔记id）')
+  .option('--date <date>', '批次日期 YYYY-MM-DD，默认今天')
+  .option('--db <mode>', 'pg | memory')
+  .action(async (externalId: string, platformRaw: string, opts: { videoId: string; date?: string; db?: string }) => {
+    const repo = createRepo(opts.db);
+    const platform = parsePlatform(platformRaw);
+    const result = await linkVideoId({ repo, date: opts.date, externalId, platform, videoId: opts.videoId });
+    console.log(`🔗 已补链: ${result.date} ${result.externalId} ${PLATFORM_LABEL[result.platform]} → video_id ${result.videoId}`);
+    console.log('   （gwd attribution 即可对该内容归因）');
     if (repo instanceof PgRepo) await repo.close();
   });
 
@@ -1297,10 +1390,42 @@ program
         platform: 'xiaohongshu',
         url: 'https://www.xiaohongshu.com/explore/demo0000000000000000',
         aiLabeled: true,
+        videoId: 'demo-note-001',
       });
       console.log(`    人工发布完成 → 台账回填: ${rec.externalId} ${PLATFORM_LABEL[rec.platform]}（内容↔品↔平台↔时间已绑定）`);
       const after = await listPublishQueue({ repo, date });
       printPublishQueue(after);
+      console.log(`\n[7.5] 内容层归因（模块⑤）演示：发布台账 join 真实表现（demo 注入一份当日表现数据）`);
+      await repo.upsertSimStats([
+        {
+          source: 'manual',
+          videoId: 'demo-note-001',
+          authorId: 'me',
+          statDate: date,
+          videoType: null,
+          uploadDt: null,
+          videoDuration: null,
+          videoTagName: null,
+          showCnt: 1200,
+          playCnt: 640,
+          completePlayCnt: 288,
+          likeCnt: 58,
+          commentCnt: 6,
+          shareCnt: 7,
+          followCnt: 12,
+          collectCnt: 15,
+          reportCnt: 0,
+          caption: null,
+          topicTag: null,
+          category: null,
+        },
+      ]);
+      const attr = await buildAttribution({ repo });
+      console.log(`⚠ ${attr.disclaimer}`);
+      for (const c of attr.contents) {
+        const pctFmt = (v: number | null): string => (v == null ? '—' : `${(v * 100).toFixed(1)}%`);
+        console.log(`    ${c.externalId} [${PLATFORM_LABEL[c.platform]}] 曝光 ${c.totals.showCnt} · 播放 ${c.totals.playCnt} · 完播率 ${pctFmt(c.completeRate)} · 互动率 ${pctFmt(c.interactionRate)}`);
+      }
     }
     console.log(`\n[8] 结论回写闭环（模块⑤）演示：提案登记 → 人批准 → 版本化生效 → 可回滚`);
     const proposal = await repo.createRuleProposal({
