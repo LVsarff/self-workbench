@@ -169,3 +169,61 @@ footer { margin-top: 28px; font-size: 12px; color: var(--muted); text-align: cen
 .actions button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .actions button.ghost { background: var(--card); border: 1px solid var(--line); color: var(--muted); font-weight: 400; }
 .actions button.ghost:hover { border-color: var(--muted); }
+
+/* —— 统一导航（模块② P1）—— */
+.nav {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  background: var(--card); border-bottom: 1px solid var(--line);
+  padding: 8px 16px;
+}
+.nav-brand { font-weight: 700; margin-right: 12px; color: var(--ink); }
+.nav a {
+  color: var(--muted); text-decoration: none; font-size: 13px;
+  padding: 5px 12px; border-radius: 8px;
+}
+.nav a:hover { color: var(--ink); background: #f2f3f5; }
+.nav a.cur { color: var(--brand); background: #ffece8; font-weight: 600; }
+
+/* —— 首页总览（模块② P1）—— */
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.overview-card {
+  display: block; background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 16px; text-decoration: none; color: var(--ink);
+}
+.overview-card:hover { border-color: var(--brand); }
+.overview-card b { display: block; font-size: 28px; font-weight: 700; }
+.overview-card span { display: block; font-size: 13px; color: var(--muted); margin-top: 4px; }
+.overview-card .hint { font-size: 12px; color: var(--warn); margin-top: 6px; }
+.flow-step { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; font-size: 13px; }
+.flow-step .dot { flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: #fff; }
+.flow-step .dot.done { background: var(--ok); }
+.flow-step .dot.todo { background: #c9cdd4; }
+.flow-step .dot.now { background: var(--brand); }
+.flow-step .label { color: var(--ink); }
+.flow-step .label.muted { color: var(--muted); }
+
+/* —— 日期快捷切换（模块② P3）—— */
+.datequick { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.datequick button {
+  border: none; border-radius: 0; padding: 6px 12px; font-size: 12px; cursor: pointer;
+  background: var(--card); color: var(--muted);
+}
+.datequick button + button { border-left: 1px solid var(--line); }
+.datequick button.on { background: var(--ink); color: #fff; font-weight: 600; }
+.datequick button:hover:not(.on) { color: var(--ink); }
+
+/* —— 移动端适配（模块② P3）—— */
+@media (max-width: 640px) {
+  .wrap { padding: 16px 12px 60px; }
+  .wrap.wide { padding: 16px 12px 60px; }
+  .nav { padding: 6px 10px; gap: 2px; }
+  .nav-brand { margin-right: 6px; }
+  .nav a { padding: 5px 8px; font-size: 12px; }
+  .overview-grid { grid-template-columns: repeat(2, 1fr); }
+  .metrics { grid-template-columns: repeat(3, 1fr); }
+  .card { padding: 12px; }
+  .card .score { font-size: 17px; }
+  .toolbar { gap: 6px; }
+  header.top h1 { font-size: 18px; }
+}

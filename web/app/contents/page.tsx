@@ -9,6 +9,8 @@
  * - 所有文本经 React 转义渲染，不拼接原始 HTML（静态门禁测试兜底）
  */
 import { useCallback, useEffect, useState } from 'react';
+import DateQuick from '../components/DateQuick';
+import { usePersistentState } from '../lib/usePersistentState';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8787';
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
@@ -99,7 +101,7 @@ function isXhs(c: XiaohongshuNote | DouyinScript | null): c is XiaohongshuNote {
 }
 
 export default function ContentsPage() {
-  const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = usePersistentState<string>('gwd:contents:date', new Date().toISOString().slice(0, 10));
   const [data, setData] = useState<ContentsResult | null>(null);
   const [openKey, setOpenKey] = useState<string | null>(null); // `${externalId}:${platform}`
   const [checked, setChecked] = useState<boolean[]>([]);
@@ -109,7 +111,7 @@ export default function ContentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // 首挂载读一次 ?date=（post-mount，避免 hydration 抖动；与 dashboard 页同惯例）
+  // 首挂载读一次 ?date=（post-mount，URL 显式指定优先于 localStorage 记忆）
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     const d = q.get('date');
@@ -215,11 +217,12 @@ export default function ContentsPage() {
       <header className="top">
         <h1>内容确认（门③）</h1>
         <span className="sub">
-          合规最后关口 · <a href="/">← 勾选门</a> · <a href="/dashboard">数据看板</a>
+          合规最后关口 · <a href="/">← 今日总览</a>
         </span>
       </header>
 
       <div className="toolbar">
+        <DateQuick value={date} onChange={setDate} />
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <button onClick={() => void load(date)} disabled={loading}>
           {loading ? '加载中…' : '刷新'}

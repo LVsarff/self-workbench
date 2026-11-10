@@ -8,6 +8,8 @@
  * - 台账 url 经后端 http(s) 协议白名单校验后才入库，此处方可安全作为链接渲染（React 转义兜底）
  */
 import { useCallback, useEffect, useState } from 'react';
+import DateQuick from '../components/DateQuick';
+import { usePersistentState } from '../lib/usePersistentState';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8787';
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
@@ -64,7 +66,7 @@ function fmtTime(iso: string | null): string {
 }
 
 export default function PublishPage() {
-  const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = usePersistentState<string>('gwd:publish:date', new Date().toISOString().slice(0, 10));
   const [data, setData] = useState<PublishResult | null>(null);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [url, setUrl] = useState('');
@@ -185,11 +187,12 @@ export default function PublishPage() {
       <header className="top">
         <h1>发布台账</h1>
         <span className="sub">
-          门④ · 发布永远人工 · <a href="/">← 勾选门</a> · <a href="/contents">内容确认</a> · <a href="/dashboard">数据看板</a>
+          门④ · 发布永远人工 · <a href="/">← 今日总览</a>
         </span>
       </header>
 
       <div className="toolbar">
+        <DateQuick value={date} onChange={setDate} />
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <button onClick={() => void load(date)} disabled={loading}>
           {loading ? '加载中…' : '刷新'}

@@ -8,6 +8,7 @@
  * - 图表 = 手写 SVG（零新增依赖）；所有文本经 React 转义渲染，不注入原始 HTML（静态门禁测试兜底）
  */
 import { useCallback, useEffect, useState } from 'react';
+import { usePersistentState } from '../lib/usePersistentState';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8787';
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
@@ -127,13 +128,13 @@ function TrendChart({ daily }: { daily: DailyPoint[] }) {
 }
 
 export default function DashboardPage() {
-  const [source, setSource] = useState<Source>('sim');
-  const [author, setAuthor] = useState<string>('');
+  const [source, setSource] = usePersistentState<Source>('gwd:dashboard:source', 'sim');
+  const [author, setAuthor] = usePersistentState<string>('gwd:dashboard:author', '');
   const [data, setData] = useState<DashboardResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 首挂载读一次 ?source= / ?author=（post-mount，避免 hydration 抖动）
+  // 首挂载读一次 ?source= / ?author=（post-mount，URL 显式指定优先于 localStorage 记忆）
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     const s = q.get('source');
@@ -181,7 +182,7 @@ export default function DashboardPage() {
       <header className="top">
         <h1>数据看板</h1>
         <span className="sub">
-          账号-内容-日口径 · <a href="/">← 返回勾选门</a>
+          账号-内容-日口径 · <a href="/">← 今日总览</a>
         </span>
       </header>
 

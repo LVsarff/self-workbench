@@ -1,83 +1,102 @@
 'use client';
 
 /**
- * 勾选门（门①）最小页面：
- * - 拉取后端 /api/daily-list（Fastify，默认 http://localhost:8787）
- * - 勾选候选品 → POST /api/select（append-only 决策流水）
- * - 只读展示：门槛淘汰 / 待评品不做勾选（人可以推翻规则，但走 CLI 留更完整审计）
+ * 首页总览（模块② P1）：一眼看到今天卡在哪一步。
+ * - 只读汇总，复用三个现有 API 的计数（daily-list / contents / publish），不新增后端
+ * - 五个流程步骤状态：候选清单 → 勾选 → 内容 → 发布 → 归因
+ * - 每个计数卡片可点击直达对应页面；所有文本 React 转义，无注入面
  */
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import DateQuick from './components/DateQuick';
+import { usePersistentState } from './lib/usePersistentState';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8787';
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
 
-function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  return API_TOKEN ? { 'x-api-token': API_TOKEN, ...extra } : { ...extra };
-}
-
-interface Item {
-  productId: string;
-  externalId: string;
-  title: string;
-  category: string | null;
-  price: number | null;
-  commissionRate: number | null;
-  sales30d: number | null;
-  momTrend: string | null;
-  reviewRate: number | null;
-  total: number;
-  grade: 'strong' | 'test' | 'drop' | null;
-  gatePassed: boolean;
-  complete: boolean;
-  flags: string[];
-  reason: string | null;
-  reasonSource: 'llm' | 'template' | 'manual' | null;
-  selected: boolean;
+function authHeaders(): Record<string, string> {
+  return API_TOKEN ? { 'x-api-token': API_TOKEN } : {};
 }
 
 interface DailyList {
   date: string;
-  runId: string;
-  ruleVersion: number;
   phase: string;
   status: string;
-  items: Item[];
+  items: Array<{ gatePassed: boolean; complete: boolean; selected: boolean }>;
 }
 
-const GRADE_LABEL: Record<string, string> = { strong: '强推', test: '可测', drop: '放弃' };
-const SRC_LABEL: Record<string, string> = { llm: 'AI 理由', template: '模板理由', manual: '人工' };
-
-function trendLabel(t: string | null): string {
-  if (t === 'up') return ' ↗';
-  if (t === 'down') return ' ↘';
-  return '';
+interface ContentsResult {
+  drafts: Array<{ status: string }>;
 }
 
-export default function Page() {
-  const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
-  const [list, setList] = useState<DailyList | null>(null);
-  const [checked, setChecked] = useState<Set<string>>(new Set());
+interface PublishResult {
+  items: Array<{ record: { status: string } }>;
+}
+
+interface Overview {
+  date: string;
+  candidateTotal: number;
+  rankedTotal: number;
+  selectedTotal: number;
+  pendingDraft: number;
+  pendingPublish: number;
+  published: number;
+  hasList: boolean;
+}
+
+const EMPTY: Overview = {
+  date: '',
+  candidateTotal: 0,
+  rankedTotal: 0,
+  selectedTotal: 0,
+  pendingDraft: 0,
+  pendingPublish: 0,
+  published: 0,
+  hasList: false,
+};
+
+export default function OverviewPage() {
+  const [date, setDate] = usePersistentState<string>('gwd:overview:date', new Date().toISOString().slice(0, 10));
+  const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async (d: string) => {
     setLoading(true);
     setError(null);
-    setNotice(null);
     try {
-      const res = await fetch(`${API}/api/daily-list?date=${d}`, { headers: authHeaders() });
-      const body = await res.json();
-      if (!res.ok) {
-        setList(null);
-        setError(body?.error ?? `请求失败（${res.status}）`);
-        return;
-      }
-      setList(body as DailyList);
-      setChecked(new Set(((body as DailyList).items ?? []).filter((i) => i.selected).map((i) => i.externalId)));
+      // 三路并行拉取，各自容错：单个失败不影响其他（总览页要尽量给信息）
+      const [listRes, contentsRes, publishRes] = await Promise.all([
+        fetch(`${API}/api/daily-list?date=${d}`, { headers: authHeaders() }),
+        fetch(`${API}/api/contents?date=${d}`, { headers: authHeaders() }),
+        fetch(`${API}/api/publish?date=${d}`, { headers: authHeaders() }),
+      ]);
+
+      const listBody = listRes.ok ? ((await listRes.json()) as DailyList) : null;
+      const contentsBody = contentsRes.ok ? ((await contentsRes.json()) as ContentsResult) : null;
+      const publishBody = publishRes.ok ? ((await publishRes.json()) as PublishResult) : null;
+
+      const items = listBody?.items ?? [];
+      const ranked = items.filter((i) => i.gatePassed && i.complete);
+      const selected = items.filter((i) => i.selected);
+      const drafts = contentsBody?.drafts ?? [];
+      const pendingDraft = drafts.filter((s) => s.status === 'draft' || s.status === 'needs_manual').length;
+      const pubItems = publishBody?.items ?? [];
+      const pendingPublish = pubItems.filter((i) => i.record.status === 'pending').length;
+      const published = pubItems.filter((i) => i.record.status === 'published').length;
+
+      setData({
+        date: d,
+        candidateTotal: items.length,
+        rankedTotal: ranked.length,
+        selectedTotal: selected.length,
+        pendingDraft,
+        pendingPublish,
+        published,
+        hasList: listBody != null,
+      });
     } catch (e) {
-      setList(null);
+      setData(null);
       setError(`连不上后端（${API}）：${e instanceof Error ? e.message : String(e)}。先启动 API：npm run api`);
     } finally {
       setLoading(false);
@@ -88,151 +107,105 @@ export default function Page() {
     void load(date);
   }, [date, load]);
 
-  const ranked = (list?.items ?? []).filter((i) => i.gatePassed && i.complete);
-  const others = (list?.items ?? []).filter((i) => !(i.gatePassed && i.complete));
-
-  function toggle(id: string) {
-    setChecked((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  async function submit() {
-    if (!list) return;
-    const ids = [...checked];
-    setSubmitting(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await fetch(`${API}/api/select`, {
-        method: 'POST',
-        headers: authHeaders({ 'content-type': 'application/json' }),
-        body: JSON.stringify({ date, externalIds: ids, note: 'web 勾选门' }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        setError(body?.error ?? `提交失败（${res.status}）`);
-        return;
-      }
-      setNotice(`已勾选 ${body.selected?.length ?? 0} 个（幂等跳过 ${body.alreadySelected?.length ?? 0} 个），决策已 append-only 落库。`);
-      await load(date);
-    } catch (e) {
-      setError(`提交失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setSubmitting(false);
-    }
-  }
+  const d = data ?? EMPTY;
 
   return (
-    <main className="wrap">
+    <main className="wrap wide">
       <header className="top">
-        <h1>AI 带货工作台</h1>
-        <span className="sub">
-          今日候选清单 · 人只做勾选（门①） · <a href="/contents">内容确认（门③）</a> · <a href="/publish">发布台账（门④）</a> ·{' '}
-          <a href="/dashboard">数据看板</a>
-        </span>
+        <h1>今日总览</h1>
+        <span className="sub">今天卡在哪一步，一眼看清 · 数据只读汇总</span>
       </header>
 
       <div className="toolbar">
+        <DateQuick value={date} onChange={setDate} />
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <button onClick={() => void load(date)} disabled={loading}>
           {loading ? '加载中…' : '刷新'}
         </button>
-        <button
-          className="primary"
-          onClick={() => void submit()}
-          disabled={submitting || !list || list.phase === 'selected' || checked.size === 0}
-        >
-          {submitting ? '提交中…' : `确认勾选（${checked.size}）`}
-        </button>
-        {list && (
-          <span className="sub">
-            run {list.runId.slice(0, 8)}… · 规则 v{list.ruleVersion} · {list.phase}
-            {list.status === 'degraded' ? ' · LLM 降级' : ''}
-          </span>
-        )}
+        {data && <span className="sub">{data.date}</span>}
       </div>
 
       {error && <div className="msg error">{error}</div>}
-      {notice && <div className="msg ok">{notice}</div>}
 
-      {!list && !loading && (
+      {!data && !loading && !error && (
         <div className="empty">
-          <p>这一天没有候选清单。</p>
+          <p>暂无数据。</p>
           <p>
             先跑流水线：<code>npm run gwd -- daily-scan</code>
           </p>
         </div>
       )}
 
-      {list && (
+      {data && !d.hasList && !loading && (
+        <div className="empty">
+          <p>{d.date} 还没有候选清单。</p>
+          <p>
+            先跑：<code>npm run gwd -- daily-scan</code>
+          </p>
+        </div>
+      )}
+
+      {data && d.hasList && (
         <>
           <section>
-            <h2>排行榜（门槛通过 + 主观三维齐全，Top{ranked.length}）</h2>
-            {ranked.map((i) => (
-              <label key={i.productId} className={`card${checked.has(i.externalId) ? ' picked' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={checked.has(i.externalId)}
-                  onChange={() => toggle(i.externalId)}
-                  disabled={list.phase === 'selected'}
-                />
-                <div>
-                  <div className="title">
-                    {i.grade && <span className={`badge ${i.grade}`}>{GRADE_LABEL[i.grade]}</span>}
-                    {i.title}
-                  </div>
-                  <div className="meta">
-                    {i.externalId} · {i.category ?? '类目缺失'} · ￥{i.price ?? '-'} · 佣金 {i.commissionRate ?? '-'}% · 销量{' '}
-                    {i.sales30d ?? '-'}
-                    {trendLabel(i.momTrend)} · 好评 {i.reviewRate ?? '-'}%
-                  </div>
-                  {i.reason && (
-                    <div className="reason">
-                      {i.reasonSource && <span className="badge src">{SRC_LABEL[i.reasonSource] ?? i.reasonSource}</span>}
-                      {i.reason}
-                    </div>
-                  )}
-                  {i.flags.length > 0 && <div className="flags">⚠ {i.flags.join('；')}</div>}
-                </div>
-                <div className="score">
-                  {i.total}
-                  <small>总分</small>
-                </div>
-              </label>
-            ))}
+            <h2>今日进度（{d.date}）</h2>
+            <div className="overview-grid">
+              <Link className="overview-card" href="/gate">
+                <b>{d.rankedTotal}</b>
+                <span>候选品入榜（待勾选）</span>
+                {d.rankedTotal > 0 && d.selectedTotal === 0 && <span className="hint">→ 去勾选</span>}
+              </Link>
+              <Link className="overview-card" href="/gate">
+                <b>{d.selectedTotal}</b>
+                <span>已勾选（进入内容生成）</span>
+              </Link>
+              <Link className="overview-card" href="/contents">
+                <b>{d.pendingDraft}</b>
+                <span>待确认草稿</span>
+                {d.pendingDraft > 0 && <span className="hint">→ 去确认（门③）</span>}
+              </Link>
+              <Link className="overview-card" href="/publish">
+                <b>{d.pendingPublish}</b>
+                <span>待发布</span>
+                {d.pendingPublish > 0 && <span className="hint">→ 去发布（门④）</span>}
+              </Link>
+              <Link className="overview-card" href="/attribution">
+                <b>{d.published}</b>
+                <span>已发布（进归因）</span>
+              </Link>
+            </div>
           </section>
 
-          {others.length > 0 && (
-            <section>
-              <h2>未入榜（门槛未过 / 待评）</h2>
-              {others.map((i) => (
-                <div key={i.productId} className="card off">
-                  <div>
-                    <div className="title">
-                      {i.grade ? <span className={`badge ${i.grade}`}>{GRADE_LABEL[i.grade]}</span> : null}
-                      {i.title}
-                    </div>
-                    <div className="meta">
-                      {i.externalId} · {i.category ?? '类目缺失'} · 佣金 {i.commissionRate ?? '-'}% · 好评 {i.reviewRate ?? '-'}%
-                    </div>
-                    <div className="flags">{i.flags.length > 0 ? i.flags.join('；') : '门槛未过（一票否决）'}</div>
-                  </div>
-                  <div className="score">
-                    {i.total}
-                    <small>不参与排序</small>
-                  </div>
-                </div>
-              ))}
-            </section>
-          )}
+          <section>
+            <h2>流水线状态</h2>
+            <FlowSteps d={d} />
+          </section>
         </>
       )}
 
-      <footer>勾选决策 append-only 落库，成为后续内容生成 run 的输入 · 本页面不做发布，发布保持人工</footer>
+      <footer>首页只读汇总 · 各计数来自 daily-list / contents / publish 三个只读 API · 点击卡片直达对应步骤</footer>
     </main>
+  );
+}
+
+/** 五步流水线：候选 → 勾选 → 内容 → 发布 → 归因 */
+function FlowSteps({ d }: { d: Overview }) {
+  const steps: Array<{ label: string; href: string; done: boolean; now: boolean }> = [
+    { label: '① 候选清单', href: '/gate', done: d.hasList, now: d.hasList && d.selectedTotal === 0 },
+    { label: '② 勾选', href: '/gate', done: d.selectedTotal > 0, now: d.selectedTotal > 0 && d.pendingDraft === 0 },
+    { label: '③ 内容确认', href: '/contents', done: d.pendingDraft === 0 && d.selectedTotal > 0, now: d.pendingDraft > 0 },
+    { label: '④ 发布', href: '/publish', done: d.pendingPublish === 0 && d.pendingDraft === 0 && d.selectedTotal > 0, now: d.pendingPublish > 0 },
+    { label: '⑤ 归因', href: '/attribution', done: d.published > 0, now: d.published > 0 && d.pendingPublish === 0 },
+  ];
+
+  return (
+    <div>
+      {steps.map((s) => (
+        <Link key={s.label} href={s.href} className="flow-step" style={{ textDecoration: 'none' }}>
+          <span className={`dot ${s.now ? 'now' : s.done ? 'done' : 'todo'}`}>{s.now ? '▶' : s.done ? '✓' : '·'}</span>
+          <span className={`label${s.now || s.done ? '' : ' muted'}`}>{s.label}</span>
+        </Link>
+      ))}
+    </div>
   );
 }
