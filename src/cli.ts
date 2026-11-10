@@ -17,7 +17,8 @@
  *   gwd publish-list [--date]              待发布队列 + 发布台账（建议时段/超时警示）
  *   gwd published <id> <platform> --url    人工发布后回填台账（链接/时间/AI 标注/--video-id 归因锚点）
  *   gwd attribution [--days] [--platform]  内容层表现归因（模块⑤：发布台账 join 真实表现，零 LLM）
- *   gwd attribution-link <id> <platform> --video-id  补链/修正归用 video_id（幂等可重跑）
+ *   gwd attribution-link <id> <platform> --video-id  补链/修正归因 video_id（幂等可重跑）
+ *   gwd product-attribution [--days]       品级成交归因（模块⑤ 5/5：发布台账按品 join 商品层成交，零 LLM）
  *   gwd sim-import [--dir] [--limit]       导入 KuaiRec 模拟表现数据（B3 第一批，幂等）
  *   gwd sim-dashboard [--author]           模拟数据账号看板（日趋势/Top 内容/异常日）
  *   gwd real-import <csv> [--limit]        导入本人账号真实表现数据（P0，source=manual，幂等）
@@ -45,6 +46,7 @@ import { runContentGen } from './pipeline/content-gen.js';
 import { confirmContentDraft, discardContentDraft, GATE3_CHECKLIST } from './pipeline/content-confirm.js';
 import { listPublishQueue, recordPublish, syncPublishQueue, type PublishQueueItem } from './pipeline/publish.js';
 import { buildAttribution, linkVideoId, PRODUCT_SAMPLE_MIN, type AttributionReport } from './pipeline/attribution.js';
+import { buildProductAttribution, type ProductAttributionReport } from './pipeline/product-attribution.js';
 import { isoToShanghaiDisplay } from './core/publish-slots.js';
 import { selectProducts } from './pipeline/select.js';
 import { createReasonAgentFromEnv, createScriptedReasonAgent } from './agent/reason-agent.js';
@@ -260,6 +262,54 @@ function printAttribution(report: AttributionReport): void {
 }
 
 const program = new Command();
+
+/** 品级成交归因报表展示（模块⑤ 5/5：真实通道，结论带样本量；口径声明强制显示） */
+function printProductAttribution(report: ProductAttributionReport): void {
+  const pct = (v: number | null): string => (v == null ? '  —  ' : `${(v * 100).toFixed(1)}%`);
+  const num = (v: number): string => v.toLocaleString();
+  const money = (v: number): string => `¥${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  console.log(`\n💰 品级成交归因 — 窗口 ${report.days} 天（首条发布日 + ${report.days - 1} 天）· 生成于 ${isoToShanghaiDisplay(report.generatedAt)}`);
+  console.log(`⚠ ${report.disclaimer}`);
+
+  if (report.products.length === 0) {
+    console.log('\n没有可归因的已发布品（前提：gwd published 回填发布 + gwd real-product-import 导商品层成交数据）');
+  } else {
+    console.log(`\n—— 品级成交归因（按窗口成交金额降序，共 ${report.products.length} 品；小样本护栏：<${PRODUCT_SAMPLE_MIN} 条内容只展示不排名）——`);
+    report.products.forEach((p, idx) => {
+      const flag = p.sampleSufficient ? '' : '  ⚠ 样本不足·不排名';
+      console.log(
+        `  ${String(idx + 1).padStart(2)}. ${p.externalId}  ${p.title?.slice(0, 24) ?? ''}${flag}`,
+      );
+      console.log(
+        `      已发布内容 ${p.contentCount} 条（${p.platforms.map((x) => PLATFORM_LABEL[x]).join('、')}）  首发 ${p.windowFrom}  窗口 ${p.windowFrom} ~ ${p.windowTo}  数据 ${p.statDays} 天`,
+      );
+      console.log(
+        `      点击 ${num(p.totals.clickCnt)}  加购 ${num(p.totals.addCartCnt)}  订单 ${num(p.totals.orderCnt)}  成交 ${money(p.totals.gmvAmount)}  佣金 ${money(p.totals.commissionAmount)}`,
+      );
+      console.log(
+        `      加购率 ${pct(p.addCartRate)}  成交转化 ${pct(p.orderRate)}  每内容均摊 GMV ${p.gmvPerContent == null ? '—' : money(p.gmvPerContent)}（参考值，勿反推单条效果）`,
+      );
+      for (const c of p.contents) {
+        console.log(`        · ${PLATFORM_LABEL[c.platform]}  发布 ${isoToShanghaiDisplay(c.publishedAt)}  video_id ${c.videoId ?? '未回填（gwd attribution-link 补）'}`);
+      }
+    });
+  }
+
+  const issues = report.issues;
+  if (issues.noPerfData.length + issues.outOfWindow.length + issues.perfNoPublish.length > 0) {
+    console.log('\n—— 未归因清单（不静默跳过，逐条给原因）——');
+    for (const i of issues.noPerfData) {
+      console.log(`  ⚠ ${i.externalId} 已发布 ${i.contentCount} 条内容，但商品层台账无该品行（未导出 / 或选品池外）→ 先 gwd real-product-import 导后台 CSV（「无行」≠「0 成交」）`);
+    }
+    for (const i of issues.outOfWindow) {
+      console.log(`  ⚠ ${i.externalId} 有商品层数据（历史 ${i.statDays} 天）但窗口内 0 天 → 检查首条发布日是否正确 / 后台是否已导出该区间`);
+    }
+    for (const i of issues.perfNoPublish) {
+      console.log(`  ⚠ ${i.productId}${i.productTitle ? `（${i.productTitle.slice(0, 24)}）` : ''} 商品层有成交 ${money(i.gmvAmount)} 但发布台账无该品 → 选品池外直接挂车 / 或两边 external_id 不一致`);
+    }
+  }
+}
+
 program.name('gwd').description('个人 AI 带货工作台（MVP：单 Agent 选品中心）').version('0.1.0');
 
 program
@@ -788,6 +838,21 @@ program
       const platform = opts.platform === undefined ? undefined : parsePlatform(opts.platform);
       const report = await buildAttribution({ repo, days: opts.days, platform });
       printAttribution(report);
+    } finally {
+      if (repo instanceof PgRepo) await repo.close();
+    }
+  });
+
+program
+  .command('product-attribution')
+  .description('品级成交归因（模块⑤ 5/5：发布台账按品聚合 join 商品层成交台账 by product_id；成交维度，零 LLM）')
+  .option('--days <n>', '归因窗口天数（默认 30，1-90；起点 = 该品首条内容发布日）', (v: string) => Number(v))
+  .option('--db <mode>', 'pg | memory')
+  .action(async (opts: { days?: number; db?: string }) => {
+    const repo = createRepo(opts.db);
+    try {
+      const report = await buildProductAttribution({ repo, days: opts.days });
+      printProductAttribution(report);
     } finally {
       if (repo instanceof PgRepo) await repo.close();
     }
@@ -1425,6 +1490,28 @@ program
       for (const c of attr.contents) {
         const pctFmt = (v: number | null): string => (v == null ? '—' : `${(v * 100).toFixed(1)}%`);
         console.log(`    ${c.externalId} [${PLATFORM_LABEL[c.platform]}] 曝光 ${c.totals.showCnt} · 播放 ${c.totals.playCnt} · 完播率 ${pctFmt(c.completeRate)} · 互动率 ${pctFmt(c.interactionRate)}`);
+      }
+
+      console.log(`\n[7.6] 品级成交归因（模块⑤ 5/5 收官）演示：发布台账按品 join 商品层成交（demo 注入一份当日成交数据）`);
+      await repo.upsertProductStats([
+        {
+          source: 'manual',
+          productId: xhs.externalId,
+          statDate: date,
+          productTitle: xhs.title,
+          category: null,
+          clickCnt: 320,
+          addCartCnt: 45,
+          orderCnt: 12,
+          gmvAmount: 478.8,
+          commissionAmount: 119.7,
+        },
+      ]);
+      const pattr = await buildProductAttribution({ repo });
+      console.log(`⚠ ${pattr.disclaimer}`);
+      for (const p of pattr.products) {
+        const pctFmt = (v: number | null): string => (v == null ? '—' : `${(v * 100).toFixed(1)}%`);
+        console.log(`    ${p.externalId} 点击 ${p.totals.clickCnt} · 加购 ${p.totals.addCartCnt} · 订单 ${p.totals.orderCnt} · 成交 ¥${p.totals.gmvAmount} · 佣金 ¥${p.totals.commissionAmount} · 成交转化 ${pctFmt(p.orderRate)}`);
       }
     }
     console.log(`\n[8] 结论回写闭环（模块⑤）演示：提案登记 → 人批准 → 版本化生效 → 可回滚`);

@@ -13,7 +13,8 @@ V2 增强（已完成）主观三维辅助打档：`gwd grade-suggest` 对「门
 V2 增强（已完成）深度调研摘要（模块① 收官）：`gwd research <id> --file 抄录.txt` 把人工抄录的评论区原文交给 LLM 提炼 {舆情倾向 / 风险信号 / 可用素材点}。**摘要是参考不是事实（人终判）**；原文商家可控 → 超 8000 字截断后才进 prompt；一品一份（`--force` 重做）；内容工坊生成该品草稿时自动注入（买家关注点 = 选材角度，风险信号相关宣称禁止出现）。
 V2 增强（已完成）Skill 评测集（V2 收官）：`npm run eval` 用真 LLM 跑 5 个 skill × 2 用例的回归集——**改提示词 / 换模型 / 改 schema 后必跑**。断言「契约」而非「文案」（结构 schema / 白名单 / 零极限词 + 方向锚点）；评测不落审计不占生产日预算；无 key 自动跳过不炸 CI。
 B3 第一批（提前开发中，零 LLM）模拟表现台账：真实账号数据积累前，用开源数据集 KuaiRec 2.0 提前打通「数据监控/复盘」的数据层。`gwd sim-import` 把 34 万行「账号-内容-日」表现数据幂等导入（source 强制标记 `kuairec`，**模拟数据永不与真实数据混读**），`gwd sim-dashboard` 出账号层看板（曝光/播放/完播率/互动率/涨粉日趋势、Top 内容、曝光环比异常日）。**所有输出带「模拟数据 · 方法已验证、参数未验证」声明**；无「内容↔商品↔成交」归因链路（数据集不含带货归因），复盘结论仅到内容表现层。
-V3 框架先行第四批（模块⑤ 4/5）内容层表现归因：`gwd published --video-id`（发布回填时带平台内容 id，或 `gwd attribution-link` 发布后补链）→ `gwd attribution` 把发布台账（V3 归因事实表）与真实表现台账（real-import 的「账号-内容-日」行）按 video_id join，出**逐内容 / 品级 / 平台**三层归因报表（发布后 N 天窗口，默认 7 天）。**归因仅内容层——无成交归因**（商品层成交数据积累后另做）；品级 `<2` 条已归因内容只展示不排名（小样本护栏）；播放 0 时率值为 null 不猜；未归因记录逐条给原因（缺 video_id / 缺数据 / 窗口外）不静默跳过；join 锁 `source='manual'`，模拟数据同 id 撞号永不参与；零 LLM、读侧报表不落任何审计。
+V3 框架先行第四批（模块⑤ 4/5）内容层表现归因：`gwd published --video-id`（发布回填时带平台内容 id，或 `gwd attribution-link` 发布后补链）→ `gwd attribution` 把发布台账（V3 归因事实表）与真实表现台账（real-import 的「账号-内容-日」行）按 video_id join，出**逐内容 / 品级 / 平台**三层归因报表（发布后 N 天窗口，默认 7 天）。品级 `<2` 条已归因内容只展示不排名（小样本护栏）；播放 0 时率值为 null 不猜；未归因记录逐条给原因（缺 video_id / 缺数据 / 窗口外）不静默跳过；join 锁 `source='manual'`，模拟数据同 id 撞号永不参与；零 LLM、读侧报表不落任何审计。
+V3 框架先行第五批（模块⑤ 5/5 收官）品级成交归因：`gwd product-attribution` 把发布台账按品聚合（首条发布日 = 窗口起点，默认 30 天）与商品层成交台账（real-product-import 的「商品-日」行）按 product_id（= 候选快照 external_id）join，出品级**点击 / 加购 / 订单 / 成交金额 / 佣金 / 加购率 / 成交转化率 / 每内容均摊 GMV** 报表。**成交归因仅品级**——联盟后台按品导出，无内容维度，成交不分配到单条内容（声明强制，勿从均摊值反推单条效果）；点击 0 时率值 null 不猜；未归因逐条给原因（无商品行 / 窗口外 / 后台有品发布台账无）不静默跳过；零 LLM、读侧报表不落任何审计。**模块⑤ 5/5 全收官，V3 归因链路（内容层 + 成交层）框架全部就位，等真实数据即可直接产出结论。**
 
 ## 架构（单 Agent 最小方案）
 
@@ -119,6 +120,7 @@ npm run gwd -- trend-import my-trend.csv      # 导入品类趋势数据（模�
 npm run gwd -- trend-list                     # 品类趋势背景板（最新指数/日环比/区间涨跌幅，日环比降序；--category <name> 下钻日序列；仅背景参考不进打分）
 npm run gwd -- attribution                    # 内容层表现归因（模块⑤ 4/5：发布台账 join 真实表现 by video_id；--days 窗口 --platform 单平台）
 npm run gwd -- attribution-link P1001 xiaohongshu --video-id <平台内容id>  # 发布后补链 video_id（幂等可重跑）
+npm run gwd -- product-attribution           # 品级成交归因（模块⑤ 5/5：发布台账按品 join 商品层成交；--days 默认 30，起点=首条发布日）
 
 # 11) Web 数据看板（P1，可选）：浏览器看双源看板（勾选门同一个 web 服务）
 npm run api                                   # Fastify :8787（看板端点：/api/dashboard/sim · /api/dashboard/real）
@@ -192,6 +194,7 @@ gwd real-dashboard [--author]          真实数据账号看板（口径同模�
 gwd export <daily|publish> [--date] [--out]  导出 CSV（候选清单/发布台账；导出统一消毒，Excel 可安全打开）
 gwd attribution [--days] [--platform]  内容层表现归因（模块⑤ 4/5：发布台账 join 真实表现 by video_id，逐内容/品级/平台三层）
 gwd attribution-link <id> <platform> --video-id  补链/修正归因 video_id（幂等可重跑，发布后从平台拿到 id 再补）
+gwd product-attribution [--days]       品级成交归因（模块⑤ 5/5：发布台账按品 join 商品层成交 by product_id，GMV/佣金/转化率）
 gwd demo                               无 DB/无 key 一键体验（含门③ + 发布台账演示）
 ```
 
@@ -219,6 +222,8 @@ npm run test        # vitest：门槛/打分边界（含品退率分类目基准
                      # 品类趋势背景板（表头校验/指数非负整数/幂等/日环比与区间涨跌幅除零为 null/口径声明强制），
                      # 内容层归因（join 窗口语义/双源隔离红线/除零率值 null/小样本护栏/未归因清单逐条给原因/
                      #   补链幂等/平台过滤同口径/归因读取零写入），
+                     # 品级成交归因（首条发布日窗口/金额累加两位小数/除零率值 null/小样本护栏/
+                     #   未归因三类逐条给原因/读取零写入/后台有品发布台账无的反向核对），
                      # CSV 导出消毒（公式注入前缀消毒/RFC 4180 转义/正常数据不误伤），
                      # Prompt 注入防护（[DATA] 段界/围栏逃逸/只进 user 位/骨架声明）、
                      # 规则提案闭环（单向一次决策/批准时刻重校验/可回滚/深拷贝隔离）、
@@ -235,7 +240,7 @@ DATABASE_URL=postgres://gwd:gwd@127.0.0.1:5432/gwd \
   npx vitest run src/db/pg-repo.attribution.test.ts
 ```
 
-覆盖：迁移 0012 生效（列 + 索引）、完整状态机落库 + 归因端到端（join 三层 / 率值口径 / kuairec 撞号隔离 / 样本充足判定）、危险 video_id 载荷参数化不产生 SQL 注入。测试按外键依赖逆序清理，重复运行自愈。
+覆盖：迁移 0012 生效（列 + 索引）、完整状态机落库 + 归因端到端（join 三层 / 率值口径 / kuairec 撞号隔离 / 样本充足判定）、危险 video_id 载荷参数化不产生 SQL 注入、品级成交归因端到端（product_id join / 池外品反向核对）。测试按外键依赖逆序清理，重复运行自愈。
 
 ## 安全边界（对抗测试后固化）
 
@@ -270,7 +275,7 @@ src/
   core/        领域规则：门槛、七维打分、规则配置（版本化）、模板理由、极限词表、相似度、发布时段表
   db/          PgRepo（生产）/ MemoryRepo（测试+demo）/ 迁移
   agent/       单 Agent 运行时：骨架 prompt + daily-scan / content-gen / content-review / grade-suggest / research 任务包 + 工具循环
-  pipeline/    daily-scan 主流水线 / CSV 导入 / 勾选门 / 内容生成（修订循环）/ 确认门（门③）/ 发布台账（B2）/ 打档建议 / 深度调研摘要 / 模拟表现导入与账号看板（B3）/ 真实数据通道（P0：real-import + real-dashboard + 商品层 real-product-import + real-product-list）/ 内容层归因（模块⑤：attribution + attribution-link）
+  pipeline/    daily-scan 主流水线 / CSV 导入 / 勾选门 / 内容生成（修订循环）/ 确认门（门③）/ 发布台账（B2）/ 打档建议 / 深度调研摘要 / 模拟表现导入与账号看板（B3）/ 真实数据通道（P0：real-import + real-dashboard + 商品层 real-product-import + real-product-list）/ 归因（模块⑤：内容层 attribution + attribution-link / 品级成交 product-attribution）
   eval/        Skill 评测集：改提示必跑（5 skill × 2 用例，真 LLM 回归；scripted 模式测断言逻辑本身）
   api/         Fastify（给 Web 用）
   queue/       BullMQ 每日定时 + 勾选门超时
@@ -292,11 +297,12 @@ web/           Next.js 页面（勾选门 + 数据看板 /dashboard：双源切�
   - B3 第二批（提前开发中）：播放级事件导入 + 单内容下钻已就位（sim-play-import / sim-content，零 LLM）；异常日降噪（前日曝光 ≥1 万才参与环比）
   - B3 第三批（提前开发中）：周复盘报告已就位（sim-weekly：环比/Top·Bottom/规则建议，零 LLM）；候选：真实数据接入后校准参数
   - P0 真实数据通道 —— ✅ 已完成（real-import / real-dashboard：抖音创作者后台导出 CSV → 账号-内容-日台账，source=manual 与模拟数据 kuairec 强制隔离，幂等可重跑；看板口径与模拟版一致，输出各带数据源声明。局限：无归因链路，复盘结论仅到内容表现层）
-  - 商品层数据通道（模块④「商品层表现」前置）—— ✅ 通道已就位，等真实成交数据（real-product-import / real-product-list：联盟/带货后台按品导出 CSV → 商品-日台账「加购/成交订单/成交金额/佣金」，幂等可重跑；金额十进制半进位到分（对账口径不丢分）；product_id 对应候选快照 external_id，表现归因闭环的 join 锚点已预埋，**成交归因查询是剩余工作**（内容层归因已就位，见下方第四批）；KuaiRec 无商品归因，此表只有真实通道，source 类型与迁移 check 约束双重锁死；清洗逻辑抽到 core/text-clean.ts 与账号层通道共用一处维护）
+  - 商品层数据通道（模块④「商品层表现」前置）—— ✅ 通道已就位（real-product-import / real-product-list：联盟/带货后台按品导出 CSV → 商品-日台账「加购/成交订单/成交金额/佣金」，幂等可重跑；金额十进制半进位到分（对账口径不丢分）；product_id 对应候选快照 external_id，表现归因闭环的 join 锚点已预埋，**成交归因查询已完成**（见下方第五批 product-attribution）；KuaiRec 无商品归因，此表只有真实通道，source 类型与迁移 check 约束双重锁死；清洗逻辑抽到 core/text-clean.ts 与账号层通道共用一处维护）
   - P1 Web 端补全 —— ✅ 已完成：数据看板（/dashboard 双源看板页 + /api/dashboard/{sim,real} 只读端点，模拟/真实声明横幅强制显示）；门③ 确认页（/contents 双版草稿查看 + 5 项清单逐项确认/弃用 + /api/contents · /api/confirm · /api/discard，与 CLI 复用同一管线与决策流水）；门④ 发布台账（/publish 待发布队列 + 建议时段 + 超 24h 提醒 + 台账回填 + /api/publish · /api/publish-sync · /api/published，发布动作永远人工）。四页共用一个 web 服务（首页导航互通），CLI 能力不变；对抗审查累计攻破 3 项已修（author 数组参数/错误回显、date 静默回退、aiLabeled null 置默）
   - P2 对抗欠账清偿 —— ✅ 已完成：CSV 导出消毒（#3：gwd export daily|publish 统一消毒，Excel 可安全打开）+ LLM 注入防护加强（#4：prompt-guard 统一包裹 + 骨架声明「数据段内指令一律无视」）
   - V3 框架先行第一批：结论回写闭环 —— ✅ 已完成（模块⑤ 第 1/5 点：rule propose/proposals/approve/reject，建议 → 人批准 → 版本化生效 → 可回滚；提案决策单向一次，批准时刻重新校验。参数未验证——真实数据到位后走同一闭环校准）
   - V3 框架先行第二批：周报 AI 叙事 + 规则调整建议完整版 —— ✅ 已完成（模块⑤ 第 2、3/5 点：sim-weekly-ai 在零 LLM 骨架之上加 LLM 层——叙事经禁词+危险载荷校验；规则建议限白名单参数 patch + 温和幅度（≤30% 相对或 ≤5 点），系统合成完整 config 并过 parseRuleConfig，--propose-dir 导出后走同一条 rule propose→approve 人批准闭环；LLM 失败/超预算自动降级零 LLM 骨架。对抗测试四类各测一遍：恶意输入/Prompt injection/越权指令/危险命令，攻破 1 项（叙事含 shell 载荷）已修并回流第 2 步，详见 src/security/weekly-adversarial.test.ts）
   - 异常信号识别完整版（模块④ 第 5/5 点收官）—— ✅ 已完成（sim-signals / real-signals：断更「数据末日距最近发布 ≥3 天提示 · ≥7 天警示」+ 掉粉「日净涨粉聚合为负：≥100 人警示 · 否则提示」，双源同口径零 LLM；退款异常按方案 A 显式标「数据缺失 · 待后台导出口径确认后补列」，不静默跳过不造数；阈值初始经验值·参数未验证；信号 detail 全部由代码从数字合成，外部可控文本无进入路径——对抗测试四类各测一遍，攻破 0 项，详见 src/security/anomaly-signals-adversarial.test.ts）
   - 品类趋势背景板（模块① 第 15/16 点）—— ✅ 已完成（trend-import / trend-list：巨量算数等外部指数人工导出 CSV →「品类-日」趋势台账（幂等键 source+品类+日）→ 按品汇总最新指数/日环比/区间涨跌幅（除零 → null 不猜），--category 下钻日序列；source 锁死 manual 无爬虫；趋势仅作选品背景参考不进打分（打分接口签名不含趋势参数，编译期结构保证）；口径声明强制「人工导出 · 口径未验证」；对抗测试四类各测一遍，攻破 0 项，详见 src/security/trend-adversarial.test.ts）
-  - V3 框架先行第四批：内容层表现归因 —— ✅ 已完成（模块⑤ 第 4/5 点：published --video-id / attribution-link 补链（幂等）→ attribution 出逐内容/品级/平台三层报表（发布后 N 天窗口，默认 7）；API 端点 /api/attribution（只读）+ /api/attribution-link 同步就位；join 锁 source='manual' 双源隔离，kuairec 撞号不进归因；品级 <2 条只展示不排名（小样本护栏）；播放 0 率值 null 不猜；未归因逐条给原因不静默跳过；读侧报表零 LLM 零审计写入。对抗测试四类各测一遍（video_id 四层白名单/错误不回显/SQL·XSS 载荷字符集层拦死/归因读取零写入/越权 days），攻破 0 项，详见 src/security/attribution-adversarial.test.ts。**剩余：第 5/5 点成交归因**（内容↔商品↔成交，等商品层真实数据）与 Web 归因页（候选，CLI/API 已就位））
+  - V3 框架先行第四批：内容层表现归因 —— ✅ 已完成（模块⑤ 第 4/5 点：published --video-id / attribution-link 补链（幂等）→ attribution 出逐内容/品级/平台三层报表（发布后 N 天窗口，默认 7）；API 端点 /api/attribution（只读）+ /api/attribution-link 同步就位；join 锁 source='manual' 双源隔离，kuairec 撞号不进归因；品级 <2 条只展示不排名（小样本护栏）；播放 0 率值 null 不猜；未归因逐条给原因不静默跳过；读侧报表零 LLM 零审计写入。对抗测试四类各测一遍（video_id 四层白名单/错误不回显/SQL·XSS 载荷字符集层拦死/归因读取零写入/越权 days），攻破 0 项，详见 src/security/attribution-adversarial.test.ts；第二轮增量对抗 14 用例攻破 0 项 + pg 真库集成冒烟 3 项全过，详见 src/security/attribution-adversarial-round2.test.ts 与 src/db/pg-repo.attribution.test.ts）
+  - V3 框架先行第五批：品级成交归因 —— ✅ 已完成（模块⑤ 第 5/5 点收官，42/46→43/46：product-attribution 发布台账按品聚合（首条发布日=窗口起点，默认 30 天，1-90 可调）join 商品层成交台账 by product_id（= 候选快照 external_id，0010 预埋锚点兑现）→ 品级 点击/加购/订单/GMV/佣金/加购率/成交转化率/每内容均摊 GMV 报表；API 端点 /api/product-attribution（只读）同步就位；**成交归因仅品级**——联盟数据按品导出无内容维度，成交不分配到单条内容（口径声明强制「勿从均摊反推单条效果」）；点击 0 率值 null 不猜；金额累加回两位小数（对账口径不丢分）；小样本护栏 <2 条内容只展示不排名；未归因三类逐条给原因（无商品行/窗口外/后台有品发布台账无）不静默跳过；零 LLM 零审计写入。对抗测试四类各测一遍（无新增外部输入面：days 白名单/存量数据载荷保持惰性/读取零写入/类型混淆），攻破 0 项，详见 src/security/product-attribution-adversarial.test.ts；管线 8 用例 + API 端点 3 用例 + pg 真库冒烟 1 项全过。**剩余：Web 归因页（候选，CLI/API 已就位）与真实数据积累后参数校准**）

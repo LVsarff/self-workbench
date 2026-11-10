@@ -14,6 +14,7 @@
  * POST /api/published { date?, externalId, platform, url, publishedAt?, aiLabeled?, videoId? }  回填台账（一条只回填一次）
  * GET  /api/attribution?days=&platform=   内容层表现归因（模块⑤，只读；发布台账 join 真实表现 by video_id）
  * POST /api/attribution-link { date?, externalId, platform, videoId }  补链归因 video_id（幂等可重跑）
+ * GET  /api/product-attribution?days=     品级成交归因（模块⑤ 5/5，只读；发布台账按品 join 商品层成交 by product_id）
  *
  * 鉴权（对抗测试 P1 修复）：
  * - 默认绑定 127.0.0.1（单人本机场景，免 token）
@@ -31,6 +32,7 @@ import { runRealDashboard } from '../pipeline/real-dashboard.js';
 import { confirmContentDraft, discardContentDraft, GATE3_CHECKLIST } from '../pipeline/content-confirm.js';
 import { listPublishQueue, recordPublish, syncPublishQueue } from '../pipeline/publish.js';
 import { buildAttribution, linkVideoId } from '../pipeline/attribution.js';
+import { buildProductAttribution } from '../pipeline/product-attribution.js';
 import { parseVideoId } from '../core/video-id.js';
 import { isValidBatchDate, todayShanghai } from '../util.js';
 
@@ -366,6 +368,25 @@ export async function buildServer(repo?: Repo) {
       }
     },
   );
+
+  // —— 品级成交归因（模块⑤ 5/5：只读报表，商品层 source 锁 manual，零 LLM）——
+  app.get('/api/product-attribution', async (req, reply) => {
+    const q = req.query as { days?: string };
+    let days: number | undefined;
+    if (q.days != null && q.days !== '') {
+      const n = Number(q.days);
+      if (!Number.isInteger(n) || n < 1 || n > 90) {
+        return reply.code(400).send({ error: 'days 参数无效（1-90 的整数）' });
+      }
+      days = n;
+    }
+    try {
+      const report = await buildProductAttribution({ repo: db, days });
+      return report;
+    } catch (e) {
+      return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
 
   return { app, close: async () => db.close() };
 }

@@ -634,3 +634,73 @@ describe('归因端点（模块⑤ Web）：/api/published videoId · /api/attri
     await close();
   });
 });
+
+// —— 品级成交归因端点（模块⑤ 5/5：/api/product-attribution 只读）——
+
+describe('品级成交归因端点（模块⑤ 5/5 Web）：/api/product-attribution', () => {
+  /** A/xhs 已发布 + 商品层成交数据就位的仓储 */
+  async function productAttributionReadyRepo() {
+    const repo = await publishReadyRepo();
+    await syncPublishQueue({ repo, date: GATE3_DATE });
+    await repo.upsertProductStats([
+      {
+        source: 'manual',
+        productId: 'A',
+        statDate: GATE3_DATE,
+        productTitle: '商品A',
+        category: null,
+        clickCnt: 320,
+        addCartCnt: 45,
+        orderCnt: 12,
+        gmvAmount: 478.8,
+        commissionAmount: 119.7,
+      },
+    ]);
+    return repo;
+  }
+
+  it('GET /api/product-attribution：发布回填后归因 → 品级成交报表可读（只读端点）', async () => {
+    delete process.env.GWD_API_TOKEN;
+    const repo = await productAttributionReadyRepo();
+    const { app, close } = await buildServer(repo);
+    await app.inject({
+      method: 'POST',
+      url: '/api/published',
+      payload: { date: GATE3_DATE, externalId: 'A', platform: 'xiaohongshu', url: 'https://www.xiaohongshu.com/note/abc', publishedAt: '2026-01-05T21:00:00+08:00' },
+    });
+    const report = await app.inject({ method: 'GET', url: '/api/product-attribution' });
+    expect(report.statusCode).toBe(200);
+    const body = report.json();
+    expect(body.disclaimer).toContain('真实通道');
+    expect(body.disclaimer).toContain('无内容维度');
+    expect(body.products).toHaveLength(1);
+    expect(body.products[0].externalId).toBe('A');
+    expect(body.products[0].totals.gmvAmount).toBe(478.8);
+    expect(body.products[0].totals.orderCnt).toBe(12);
+    expect(body.products[0].sampleSufficient).toBe(false); // 1 条内容 → 小样本护栏
+    await app.close();
+    await close();
+  });
+
+  it('GET /api/product-attribution：days 越界 → 400；空台账 → 200 空报表', async () => {
+    delete process.env.GWD_API_TOKEN;
+    const { app, close } = await buildServer(new MemoryRepo());
+    expect((await app.inject({ method: 'GET', url: '/api/product-attribution?days=0' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/product-attribution?days=91' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/product-attribution?days=abc' })).statusCode).toBe(400);
+    const empty = await app.inject({ method: 'GET', url: '/api/product-attribution' });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json().products).toEqual([]);
+    await app.close();
+    await close();
+  });
+
+  it('配置 token：成交归因端点同样受鉴权保护', async () => {
+    process.env.GWD_API_TOKEN = 'secret-token';
+    const { app, close } = await buildServer(await productAttributionReadyRepo());
+    expect((await app.inject({ method: 'GET', url: '/api/product-attribution' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/api/product-attribution', headers: { 'x-api-token': 'secret-token' } })).statusCode).toBe(200);
+    await app.close();
+    await close();
+  });
+});

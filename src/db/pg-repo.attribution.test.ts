@@ -22,6 +22,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { PgRepo } from './pg-repo.js';
 import { migrate } from './migrate.js';
 import { buildAttribution } from '../pipeline/attribution.js';
+import { buildProductAttribution } from '../pipeline/product-attribution.js';
 import { recordPublish, syncPublishQueue } from '../pipeline/publish.js';
 import { runDailyScan } from '../pipeline/daily-scan.js';
 import { selectProducts } from '../pipeline/select.js';
@@ -44,6 +45,8 @@ describe.skipIf(SKIP)('PostgreSQL 真库冒烟：归因通道 db 层语义', () 
 
   // 前置清理 + 后置清理同一套逻辑：按外键依赖逆序删除（叶子表先删）
   async function cleanup(): Promise<void> {
+    // 0) 商品层成交数据（无外键依赖，独立表）
+    await repo['pool'].query(`delete from product_performance where product_id in ('PG-A','PG-EXT')`);
     // 1) 引用 content_drafts 的叶子表
     await repo['pool'].query(`delete from content_decisions where batch_date = $1`, [DATE]);
     await repo['pool'].query(`delete from publish_records where batch_date = $1`, [DATE]);
@@ -147,5 +150,30 @@ describe.skipIf(SKIP)('PostgreSQL 真库冒烟：归因通道 db 层语义', () 
     const tbl = await repo['pool'].query(`select 1 from publish_records limit 1`);
     expect(tbl.rows.length).toBeGreaterThan(0); // DROP 未执行，表仍在
     await repo.setPublishVideoId(target.record.id, 'pgvx1'); // 还原
+  });
+
+  it('品级成交归因在 pg 上端到端跑通（模块⑤ 5/5：发布台账按品 join product_performance）', async () => {
+    // 造商品层成交数据（upsertProductStats 参数化 upsert，幂等键 source+product_id+stat_date）
+    await repo.upsertProductStats([
+      {
+        source: 'manual', productId: 'PG-A', statDate: DATE, productTitle: '商品PG-A', category: null,
+        clickCnt: 320, addCartCnt: 45, orderCnt: 12, gmvAmount: 478.8, commissionAmount: 119.7,
+      },
+      {
+        source: 'manual', productId: 'PG-EXT', statDate: DATE, productTitle: '池外挂车品', category: null,
+        clickCnt: 5, addCartCnt: 1, orderCnt: 1, gmvAmount: 66.6, commissionAmount: 16.65,
+      },
+    ]);
+    const report = await buildProductAttribution({ repo });
+    const a = report.products.find((p) => p.externalId === 'PG-A');
+    expect(a).toBeDefined();
+    expect(a!.contentCount).toBe(2); // pgvx1 + pgvx2
+    expect(a!.totals.clickCnt).toBe(320);
+    expect(a!.totals.gmvAmount).toBe(478.8);
+    expect(a!.totals.commissionAmount).toBe(119.7);
+    expect(a!.orderRate).toBeCloseTo(12 / 320);
+    expect(a!.sampleSufficient).toBe(true);
+    // 反向核对：池外品进 issues 不进 products
+    expect(report.issues.perfNoPublish).toEqual([{ productId: 'PG-EXT', productTitle: '池外挂车品', gmvAmount: 66.6 }]);
   });
 });
